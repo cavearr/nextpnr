@@ -1191,13 +1191,13 @@ void XC7Packer::constrain_ibufds_gt_site(CellInfo *buf_cell, BelId pad_bel)
     for (int32_t i = 0; i < int32_t(sites.ssize()); i++) {
         const auto &s = sites[i];
         std::string name = IdString(s.name_prefix).str(ctx);
-        if (boost::starts_with(name, "IPAD_")) {
+        if ((name == "IPAD")) {
             int32_t sy = s.rel_y;
             if (sy < min_pad_y) min_pad_y = sy;
             if (max_pad_y < sy) max_pad_y = sy;
             if (i == pad_site.site) pad_y = sy;
         }
-        if (boost::starts_with(name, "IBUFDS_GTE2_")) {
+        if ((name == "IBUFDS_GTE2")) {
             int32_t sy = s.rel_y;
             if (sy < min_buf_y) min_buf_y = sy;
             if (max_buf_y < sy) max_buf_y = sy;
@@ -1217,7 +1217,7 @@ void XC7Packer::constrain_ibufds_gt_site(CellInfo *buf_cell, BelId pad_bel)
     for (int32_t i = 0; i < int32_t(sites.ssize()); i++) {
         const auto &s = sites[i];
         std::string name = IdString(s.name_prefix).str(ctx);
-        if (boost::starts_with(name, "IBUFDS_GTE2_") && s.rel_x == buf_x && s.rel_y == buf_y) {
+        if ((name == "IBUFDS_GTE2") && s.rel_x == buf_x && s.rel_y == buf_y) {
             buf_site = SiteIndex(tile, i);
             break;
         }
