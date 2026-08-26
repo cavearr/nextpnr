@@ -78,6 +78,25 @@ struct SiteIndex
     unsigned hash() const { return mkhash(tile, site); }
 };
 
+// Key into the hand-maintained pseudo-pip table in fasm.cc.  Shared with
+// XilinxImpl::is_pip_unavail, which must not reject a pip the fasm writer can
+// in fact emit.
+struct PseudoPipKey
+{
+    IdString tileType;
+    IdString dest;
+    IdString source;
+
+    bool operator==(const PseudoPipKey &b) const
+    {
+        return std::tie(this->tileType, this->dest, this->source) == std::tie(b.tileType, b.dest, b.source);
+    }
+
+    unsigned int hash() const { return mkhash(mkhash(tileType.hash(), source.hash()), dest.hash()); }
+};
+
+void xlnx_build_pseudo_pip_config(Context *ctx, dict<PseudoPipKey, std::vector<std::string>> &pp_config);
+
 struct XilinxImpl : HimbaechelAPI
 {
 
@@ -124,6 +143,11 @@ struct XilinxImpl : HimbaechelAPI
     bool xc7_logic_tile_valid(IdString tileType, const LogicTileStatus &lts) const;
 
     // Pips
+    // Lazily-built copy of fasm.cc's pseudo-pip table, so is_pip_unavail can
+    // tell "no bits, and no hand-written fasm either" (a trap) from "no bits,
+    // but fasm.cc emits it anyway" (fine).  Built once on first use.
+    mutable dict<PseudoPipKey, std::vector<std::string>> pseudo_pip_config;
+    mutable bool pseudo_pip_keys_valid = false;
     bool is_pip_unavail(PipId pip) const;
     // Does this design instantiate a BUFR?  The regional-clock datapath
     // (RCLK_BEFORE_DIV -> RCLK_OUT -> RCLK2RCLK -> CK_BUFRCLK) runs through a

@@ -872,6 +872,48 @@ void XC7Packer::pack_bram()
     for (int i = 4; i < 8; i++)
         bram_rules[id_RAMB36E1].port_multixform[ctx->idf("WEBWE[%d]", i)] = {};
 
+    // Drop constant ties on the dedicated CASCADE inputs of a BRAM that is not
+    // cascading.  Whether the cascade is used is decided by the A_INPUT/B_INPUT
+    // PARAMETERS (see fasm.cc, which emits A_INPUT[0] only for "CASCADE"), so a
+    // constant on the pin carries no information.  It is not harmless though:
+    // CASCADEINA has no path from general routing -- it reaches only another
+    // BRAM's CASCADEOUT -- so leaving the tie makes the router try to deliver
+    // $PACKER_VCC_NET to it and fail:
+    //   Failed to route arc of net '$PACKER_VCC_NET', from X0Y0/VCC to
+    //   RAMB36_X0Y0.CASCADEINA
+    // yosys leaves these pins unconnected, so this only bites netlists that
+    // spell the ties out -- Vivado's do, which is why importing a Vivado
+    // netlist hit it and the yosys-synthesised equivalent never did.
+    int casc_seen = 0, casc_dropped = 0, casc_bram = 0;
+    for (auto &cell : ctx->cells) {
+        CellInfo *ci = cell.second.get();
+        if (ci->type != id_RAMB18E1 && ci->type != id_RAMB36E1)
+            continue;
+        ++casc_bram;
+        for (auto &pin : {std::make_pair("CASCADEINA", "A_INPUT"),
+                          std::make_pair("CASCADEINB", "B_INPUT")}) {
+            if (str_or_default(ci->params, ctx->id(pin.second), "DIRECT") == "CASCADE")
+                continue;
+            NetInfo *n = ci->getPort(ctx->id(pin.first));
+            if (n == nullptr)
+                continue;
+            ++casc_seen;
+            log_info("  cascade tie: %s.%s net '%s' driver '%s'\n", ctx->nameOf(ci), pin.first,
+                     ctx->nameOf(n),
+                     n->driver.cell == nullptr ? "<none>" : n->driver.cell->type.c_str(ctx));
+            // only a constant tie: a real cascade net is left alone
+            // The constant network's drivers are PSEUDO_VCC/PSEUDO_GND at this
+            // point, not VCC/GND -- checking the latter matched nothing.
+            if (n->driver.cell != nullptr && n->driver.cell->type != id_PSEUDO_VCC &&
+                n->driver.cell->type != id_PSEUDO_GND)
+                continue;
+            ci->disconnectPort(ctx->id(pin.first));
+            ++casc_dropped;
+        }
+    }
+    log_info("BRAM cascade scan: %d BRAM(s), %d tie(s) seen, %d dropped\n", casc_bram, casc_seen,
+             casc_dropped);
+
     // Process SDP BRAM first
     for (auto &cell : ctx->cells) {
         CellInfo *ci = cell.second.get();

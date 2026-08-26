@@ -324,6 +324,51 @@ bool XilinxImpl::is_pip_unavail(PipId pip) const
         }
     }
 
+    // A pip prjxray has no bits for cannot be programmed, so routing through it
+    // produces a bitstream that SILENTLY lacks the connection --
+    // XRAY_ALLOW_MISSING_FEATURES drops the fasm line and bitgen carries on.
+    // The chipdb generator flags these by checking every tile-routing pip
+    // against segbits_<tile>.db and ppips_<tile>.db; see PIP_CFG_NO_BITS.
+    //
+    // The IO-column clock inputs are such a case: nothing in the artix7
+    // database defines HCLK_IOI_I2IOCLK_*.  The router used it to carry a pad's
+    // clock to a BUFG -- I2IOCLK -> IO_PLL_CLK3_DMUX -> RCLK3 -> CK_BUFRCLK1 --
+    // where Vivado takes the dedicated clock-capable input path and never
+    // touches these wires.  The result was a board that configures and does
+    // nothing at all, because the ROOT clock never reached its buffer.
+    //
+    // The pseudo-pip table is the exception: those pips carry hand-written fasm
+    // in fasm.cc and are emittable despite having no database entry, so the
+    // router must still be allowed to use them.
+    if (pip_type == PIP_TILE_ROUTING && (uint32_t(extra_data.pip_config) & PIP_CFG_NO_BITS)) {
+        if (!pseudo_pip_keys_valid) {
+            xlnx_build_pseudo_pip_config(ctx, pseudo_pip_config);
+            pseudo_pip_keys_valid = true;
+        }
+        IdString tt = IdString(chip_tile_info(ctx->chip_info, pip.tile).type_name);
+        IdString src = IdString(chip_tile_info(ctx->chip_info, pip.tile).wires[pip_data.src_wire].name);
+        IdString dst = IdString(chip_tile_info(ctx->chip_info, pip.tile).wires[pip_data.dst_wire].name);
+        // The rule is: reject a pip iff FasmBackend::write_pip would emit a
+        // feature that prjxray cannot resolve.  Anywhere write_pip
+        // deliberately emits NOTHING, the pip costs no bits and is fine to
+        // use, so the two exemption paths there must be mirrored here or we
+        // reject pips that were never a problem.  (Banning the DSP class broke
+        // VCC -> DSP48.OPMODE*INV_OUT routing outright.)
+        std::string tts = tt.str(ctx);
+        bool writer_emits_nothing = false;
+        if (tts == "DSP_L" || tts == "DSP_R") {
+            // fasm.cc: "FIXME: PPIPs missing for DSPs" -- whole tile skipped
+            writer_emits_nothing = true;
+        } else if (tts == "RIOI3_SING" || tts == "LIOI3_SING" || tts == "RIOI_SING") {
+            // fasm.cc: "FIXME: PPIPs missing for SING IOI3s"
+            std::string sn = src.str(ctx), dn = dst.str(ctx);
+            if ((sn.find("IMUX") != std::string::npos || sn.find("CTRL0") != std::string::npos) &&
+                dn.find("CLK") == std::string::npos)
+                writer_emits_nothing = true;
+        }
+        if (!writer_emits_nothing && !pseudo_pip_config.count(PseudoPipKey{tt, dst, src}))
+            return true;
+    }
     if (pip_type == PIP_SITE_ENTRY) {
         WireId dst = ctx->getPipDstWire(pip);
         if (ctx->getWireType(dst) == id_INTENT_SITE_GND) {

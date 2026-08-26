@@ -103,6 +103,57 @@ def timing_pip_classs(pip: xilinx_device.PIP):
 seen_pip_timings = set()
 seen_node_timings = set()
 
+# --- prjxray bitstream-representation lookup -------------------------------
+# A tile-routing pip is only usable if the bitstream can express it, i.e. its
+# fasm feature "<TILETYPE>.<dst_wire>.<src_wire>" appears in either
+# segbits_<tiletype>.db (has config bits) or ppips_<tiletype>.db (a pseudo-pip
+# needing no bits).  A pip in neither is a trap: nextpnr will happily route
+# through it, the fasm line is then dropped by fasm2frames, and the resulting
+# bitstream silently lacks the connection.  Mark those so the router can avoid
+# them.  See PIP_CFG_NO_BITS in extra_data.h.
+PIP_CFG_ROUTETHRU = 0x1
+PIP_CFG_NO_BITS = 0x80000000
+
+xraydb_root_for_bits = None
+_bits_cache = {}
+bits_stats = {"known": 0, "nobits": 0, "notiledb": 0}
+nobits_by_tiletype = {}
+
+def tile_type_features(tile_type):
+    """Set of fasm feature keys prjxray can express for this tile type.
+    Returns None if the tile type has no bit database at all."""
+    if tile_type in _bits_cache:
+        return _bits_cache[tile_type]
+    feats = set()
+    found_any = False
+    for kind in ("segbits", "ppips"):
+        fn = path.join(xraydb_root_for_bits, f"{kind}_{tile_type.lower()}.db")
+        if not path.exists(fn):
+            continue
+        found_any = True
+        with open(fn) as f:
+            for ln in f:
+                ln = ln.strip()
+                if ln:
+                    feats.add(ln.split()[0])
+    result = feats if found_any else None
+    _bits_cache[tile_type] = result
+    return result
+
+def pip_has_bits(tile_type, dst_wire, src_wire):
+    feats = tile_type_features(tile_type)
+    if feats is None:
+        # No database for this tile type at all -- we cannot tell, so do not
+        # accuse the pip.  Counted separately and reported.
+        bits_stats["notiledb"] += 1
+        return True
+    if f"{tile_type}.{dst_wire}.{src_wire}" in feats:
+        bits_stats["known"] += 1
+        return True
+    bits_stats["nobits"] += 1
+    nobits_by_tiletype[tile_type] = nobits_by_tiletype.get(tile_type, 0) + 1
+    return False
+
 def import_tiletype(ch: Chip, tile: xilinx_device.Tile):
     tile_type = tile.tile_type()
     if tile.x == 0 and tile.y == 0:
@@ -303,12 +354,18 @@ def import_tiletype(ch: Chip, tile: xilinx_device.Tile):
                 out_res=TimingValue(int(pip.resistance())), # mohm
                 is_buffered=pip.is_buffered())
             seen_pip_timings.add(tcls)
+        rt = PIP_CFG_ROUTETHRU if pip.is_route_thru() else 0
+        # Route-thru pips are not tile config bits at all (they borrow a site
+        # bel), so the segbits/ppips test does not apply to them.
+        fwd_nb = 0 if rt else (
+            0 if pip_has_bits(tile_type, pip.dst_wire().name(), pip.src_wire().name()) else PIP_CFG_NO_BITS)
         add_pip(pip.src_wire().name(), pip.dst_wire().name(), pip_class=PipClass.TILE_ROUTING, timing=tcls,
-            pip_config=1 if pip.is_route_thru() else 0)
-        # TODO: extra data, route-through flag
+            pip_config=rt | fwd_nb)
         if pip.is_bidi():
+            rev_nb = 0 if rt else (
+                0 if pip_has_bits(tile_type, pip.src_wire().name(), pip.dst_wire().name()) else PIP_CFG_NO_BITS)
             add_pip(pip.dst_wire().name(), pip.src_wire().name(), pip_class=PipClass.TILE_ROUTING, timing=tcls,
-                pip_config=1 if pip.is_route_thru() else 0)
+                pip_config=rt | rev_nb)
 
 def import_sdf_timings(variant, sdfcell):
     # TODO: anything other than comb
@@ -420,6 +477,9 @@ def main():
     if "xc7v" in args.device:
         metadata_root = metadata_root.replace("artix7", "virtex7")
         xraydb_root = xraydb_root.replace("artix7", "virtex7")
+    # segbits_*.db / ppips_*.db live alongside the tile_type_*.json we import
+    global xraydb_root_for_bits
+    xraydb_root_for_bits = xraydb_root
     # Load prjxray device data
     d = xilinx_device.import_device(args.device, xraydb_root, metadata_root)
     # Init constant ids
@@ -526,6 +586,18 @@ def main():
             pkg.create_pad(pin, f"X{site_data.tile.x}Y{site_data.tile.y}",
             f"{site_data.rel_name()}.{bel_name}",
             "", 0) # TODO: bank
+    # Report the bitstream-representation census.  A non-zero "no bits" count
+    # is not an error -- it is the number of pips the router must now avoid
+    # because prjxray cannot express them.  A large "no tile db" count means
+    # whole tile types went unchecked and their pips are still traps.
+    tot = bits_stats["known"] + bits_stats["nobits"]
+    print("prjxray bitstream check: %d tile-routing pips, %d expressible, "
+          "%d NOT expressible (%.2f%%), %d unchecked (tile type has no bit db)"
+          % (tot, bits_stats["known"], bits_stats["nobits"],
+             100.0 * bits_stats["nobits"] / max(tot, 1), bits_stats["notiledb"]),
+          file=sys.stderr)
+    for t, c in sorted(nobits_by_tiletype.items(), key=lambda kv: -kv[1])[:10]:
+        print("    no bits: %-28s %6d pips" % (t, c), file=sys.stderr)
     ch.write_bba(args.bba)
 
 if __name__ == '__main__':
