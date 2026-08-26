@@ -1837,7 +1837,12 @@ struct FasmBackend
         int high = 1, low = 1, phasemux = 0, delaytime = 0, frac = 0;
         bool no_count = false, edge = false;
         double divide = float_or_default(ci, name + ((name == "CLKFBOUT") ? "_MULT" : "_DIVIDE"), 1);
-        double phase = float_or_default(ci, name + "_PHASE", 1);
+        // Xilinx's default for every *_PHASE attribute is 0.0 degrees, not 1.
+        // With the old default of 1, a PLL whose RTL omits CLKFBOUT_PHASE got
+        // phase_eights = floor((1/360) * MULT * 8), which for MULT=48 is 1 --
+        // so we emitted CLKFBOUT_CLKOUT1_PHASE_MUX = 001 and shifted the
+        // FEEDBACK clock by an eighth of a VCO period.  Vivado emits 0.
+        double phase = float_or_default(ci, name + "_PHASE", 0);
         if (divide <= 1) {
             no_count = true;
         } else {
@@ -1862,8 +1867,18 @@ struct FasmBackend
             write_int_vector("DIVCLK_DIVCLK_LOW_TIME[5:0]", low, 6);
             write_bit("DIVCLK_DIVCLK_EDGE[0]", edge);
             write_bit("DIVCLK_DIVCLK_NO_COUNT[0]", no_count);
-        } else if (used) {
-            write_bit(name + "_CLKOUT1_OUTPUT_ENABLE[0]");
+        } else {
+            // Only the OUTPUT_ENABLE is conditional on the output being used.
+            // The counter fields must be written for UNUSED outputs too: with
+            // nothing emitted they programme as HIGH_TIME=0, LOW_TIME=0,
+            // NO_COUNT=0, which is a divide of zero -- an invalid counter
+            // setting on a block that shares one lock detector across all
+            // outputs.  Vivado writes HIGH_TIME=1, LOW_TIME=1, NO_COUNT=1 on
+            // every unused CLKOUT (and no OUTPUT_ENABLE), which is exactly
+            // what the defaults here produce: divide defaults to 1, so
+            // no_count is already true and high/low are already 1.
+            if (used)
+                write_bit(name + "_CLKOUT1_OUTPUT_ENABLE[0]");
             write_int_vector(name + "_CLKOUT1_HIGH_TIME[5:0]", high, 6);
             write_int_vector(name + "_CLKOUT1_LOW_TIME[5:0]", low, 6);
             write_int_vector(name + "_CLKOUT1_PHASE_MUX[2:0]", phasemux, 3);
