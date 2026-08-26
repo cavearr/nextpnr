@@ -47,6 +47,122 @@ extern const uint16_t filter_lookup_optimized[];
 extern const int64_t lk_table[];
 }; // namespace Xc7MMCM
 
+// The hand-maintained pseudo-pip table.  Out here rather than inside the fasm
+// writer because XilinxImpl::is_pip_unavail consults it too: a pip in this table
+// IS expressible even though the chipdb marked it PIP_CFG_NO_BITS, so the router
+// must be allowed to use exactly these and no others.
+void xlnx_build_pseudo_pip_config(Context *ctx, dict<PseudoPipKey, std::vector<std::string>> &pp_config)
+{
+    /*
+     * Create the mapping from pseudo pip tile type, dest wire, and source wire, to
+     * the config bits set when that pseudo pip is used
+     */
+    bool is_virtex7 = boost::starts_with(ctx->args.device, "xc7v");
+    for (std::string s : {"L", "R"})
+        for (std::string s2 : {"", "_TBYTESRC", "_TBYTETERM", "_SING"})
+            for (std::string i :
+                 (s2 == "_SING") ? std::vector<std::string>{"", "0", "1"} : std::vector<std::string>{"0", "1"}) {
+                pp_config[{ctx->id(s + "IOI3" + s2), ctx->id(s + "IOI_OLOGIC" + i + "_OQ"),
+                           ctx->id("IOI_OLOGIC" + i + "_D1")}] = {"OLOGIC_Y" + i + ".OMUX.D1",
+                                                                  "OLOGIC_Y" + i + ".OQUSED",
+                                                                  "OLOGIC_Y" + i + ".OSERDES.DATA_RATE_TQ.BUF"};
+                pp_config[{ctx->id(s + "IOI3" + s2), ctx->id("IOI_ILOGIC" + i + "_O"),
+                           ctx->id(s + "IOI_ILOGIC" + i + "_D")}] = {"IDELAY_Y" + i + ".IDELAY_TYPE_FIXED",
+                                                                     "ILOGIC_Y" + i + ".ZINV_D"};
+                pp_config[{ctx->id(s + "IOI3" + s2), ctx->id("IOI_ILOGIC" + i + "_O"),
+                           ctx->id(s + "IOI_ILOGIC" + i + "_DDLY")}] = {"ILOGIC_Y" + i + ".IDELMUXE3.P0",
+                                                                        "ILOGIC_Y" + i + ".ZINV_D"};
+                pp_config[{ctx->id(s + "IOI3" + s2), ctx->id(s + "IOI_OLOGIC" + i + "_TQ"),
+                           ctx->id("IOI_OLOGIC" + i + "_T1")}] = {"OLOGIC_Y" + i + ".ZINV_T1"};
+                if (i == "0") {
+                    pp_config[{ctx->id(s + "IOB33" + s2), id_IOB_O_IN1, id_IOB_O_OUT0}] = {};
+                    pp_config[{ctx->id(s + "IOB33" + s2), id_IOB_O_OUT0, id_IOB_O0}] = {};
+                    pp_config[{ctx->id(s + "IOB33" + s2), id_IOB_T_IN1, id_IOB_T_OUT0}] = {};
+                    pp_config[{ctx->id(s + "IOB33" + s2), id_IOB_T_OUT0, id_IOB_T0}] = {};
+                    pp_config[{ctx->id(s + "IOB33" + s2), id_IOB_DIFFI_IN0, id_IOB_PADOUT1}] = {};
+                }
+            }
+
+    for (std::string s2 : {"", "_TBYTESRC", "_TBYTETERM", "_SING"})
+        for (std::string i : (s2 == "_SING") ? std::vector<std::string>{"0"} : std::vector<std::string>{"0", "1"}) {
+            pp_config[{ctx->id("RIOI" + s2), ctx->id("RIOI_OLOGIC" + i + "_OQ"),
+                       ctx->id("IOI_OLOGIC" + i + "_D1")}] = {"OLOGIC_Y" + i + ".OMUX.D1",
+                                                              "OLOGIC_Y" + i + ".OQUSED",
+                                                              "OLOGIC_Y" + i + ".OSERDES.DATA_RATE_TQ.BUF"};
+            pp_config[{ctx->id("RIOI" + s2), ctx->id("RIOI_OLOGIC" + i + "_OFB"),
+                       ctx->id("RIOI_OLOGIC" + i + "_OQ")}] = {};
+            pp_config[{ctx->id("RIOI" + s2), ctx->id("RIOI_O" + i), ctx->id("RIOI_ODELAY" + i + "_DATAOUT")}] = {};
+            pp_config[{ctx->id("RIOI" + s2), ctx->id("RIOI_OLOGIC" + i + "_OFB"),
+                       ctx->id("IOI_OLOGIC" + i + "_D1")}] = {"OLOGIC_Y" + i + ".OMUX.D1",
+                                                              "OLOGIC_Y" + i + ".OSERDES.DATA_RATE_TQ.BUF"};
+            auto rioi_direct = PseudoPipKey{ctx->id("RIOI" + s2), ctx->id("IOI_ILOGIC" + i + "_O"),
+                                             ctx->id("RIOI_ILOGIC" + i + "_D")};
+            auto rioi_delayed = PseudoPipKey{ctx->id("RIOI" + s2), ctx->id("IOI_ILOGIC" + i + "_O"),
+                                              ctx->id("RIOI_ILOGIC" + i + "_DDLY")};
+            if (is_virtex7) {
+                pp_config[rioi_direct] = {};
+                pp_config[rioi_delayed] = {"ILOGIC_Y" + i + ".IDELMUXE3.P0"};
+            } else {
+                pp_config[rioi_direct] = {"ILOGIC_Y" + i + ".ZINV_D"};
+                pp_config[rioi_delayed] = {"ILOGIC_Y" + i + ".IDELMUXE3.P0", "ILOGIC_Y" + i + ".ZINV_D"};
+            }
+            pp_config[{ctx->id("RIOI" + s2), ctx->id("RIOI_OLOGIC" + i + "_TQ"),
+                       ctx->id("IOI_OLOGIC" + i + "_T1")}] = {"OLOGIC_Y" + i + ".ZINV_T1"};
+            pp_config[{ctx->id("RIOI" + s2), ctx->id("RIOI_OLOGIC" + i + "_OFB"),
+                       ctx->id("RIOI_ODELAY" + i + "_ODATAIN")}] = {"OLOGIC_Y" + i + ".ZINV_ODATAIN"};
+            if (i == "0") {
+                pp_config[{ctx->id("RIOB18" + s2), id_IOB_O_IN1, id_IOB_O_OUT0}] = {};
+                pp_config[{ctx->id("RIOB18" + s2), id_IOB_O_OUT0, id_IOB_O0}] = {};
+                pp_config[{ctx->id("RIOB18" + s2), id_IOB_T_IN1, id_IOB_T_OUT0}] = {};
+                pp_config[{ctx->id("RIOB18" + s2), id_IOB_T_OUT0, id_IOB_T0}] = {};
+                pp_config[{ctx->id("RIOB18" + s2), id_IOB_DIFFI_IN0, id_IOB_PADOUT1}] = {};
+            }
+        }
+
+    for (std::string s1 : {"TOP", "BOT"}) {
+        for (std::string s2 : {"L", "R"}) {
+            for (int i = 0; i < 12; i++) {
+                std::string ii = std::to_string(i);
+                std::string hck = s2 + ii;
+                std::string buf = std::string((s2 == "R") ? "X1Y" : "X0Y") + ii;
+                pp_config[{ctx->id("CLK_HROW_" + s1 + "_R"), ctx->id("CLK_HROW_CK_HCLK_OUT_" + hck),
+                           ctx->id("CLK_HROW_CK_MUX_OUT_" + hck)}] = {"BUFHCE.BUFHCE_" + buf + ".IN_USE",
+                                                                      "BUFHCE.BUFHCE_" + buf + ".ZINV_CE"};
+            }
+        }
+
+        for (int i = 0; i < 16; i++) {
+            std::string ii = std::to_string(i);
+            pp_config[{ctx->id("CLK_BUFG_" + s1 + "_R"), ctx->id("CLK_BUFG_BUFGCTRL" + ii + "_O"),
+                       ctx->id("CLK_BUFG_BUFGCTRL" + ii + "_I0")}] = {
+                    "BUFGCTRL.BUFGCTRL_X0Y" + ii + ".IN_USE", "BUFGCTRL.BUFGCTRL_X0Y" + ii + ".IS_IGNORE1_INVERTED",
+                    "BUFGCTRL.BUFGCTRL_X0Y" + ii + ".ZINV_CE0", "BUFGCTRL.BUFGCTRL_X0Y" + ii + ".ZINV_S0"};
+            pp_config[{ctx->id("CLK_BUFG_" + s1 + "_R"), ctx->id("CLK_BUFG_BUFGCTRL" + ii + "_O"),
+                       ctx->id("CLK_BUFG_BUFGCTRL" + ii + "_I1")}] = {
+                    "BUFGCTRL.BUFGCTRL_X0Y" + ii + ".IN_USE", "BUFGCTRL.BUFGCTRL_X0Y" + ii + ".IS_IGNORE0_INVERTED",
+                    "BUFGCTRL.BUFGCTRL_X0Y" + ii + ".ZINV_CE1", "BUFGCTRL.BUFGCTRL_X0Y" + ii + ".ZINV_S1"};
+        }
+    }
+
+    int rclk_y_to_i[4] = {2, 3, 0, 1};
+    for (int y = 0; y < 4; y++) {
+        std::string yy = std::to_string(y);
+        std::string ii = std::to_string(rclk_y_to_i[y]);
+        pp_config[{id_HCLK_IOI3, ctx->id("HCLK_IOI_RCLK_OUT" + ii), ctx->id("HCLK_IOI_RCLK_BEFORE_DIV" + ii)}] = {
+                "BUFR_Y" + yy + ".IN_USE", "BUFR_Y" + yy + ".BUFR_DIVIDE.BYPASS"};
+        pp_config[{id_HCLK_IOI, ctx->id("HCLK_IOI_RCLK_OUT" + ii), ctx->id("HCLK_IOI_RCLK_BEFORE_DIV" + ii)}] = {
+                "BUFR_Y" + yy + ".IN_USE", "BUFR_Y" + yy + ".BUFR_DIVIDE.BYPASS"};
+    }
+
+    // FIXME: shouldn't these be in the X-RAY ppips database?
+    for (char c : {'L', 'R'}) {
+        for (int i = 0; i < 24; i++) {
+            pp_config[{ctx->idf("INT_INTERFACE_%c", c), ctx->idf("INT_INTERFACE_LOGIC_OUTS_%c%d", c, i),
+                       ctx->idf("INT_INTERFACE_LOGIC_OUTS_%c_B%d", c, i)}];
+        }
+    }
+}
+
 namespace {
 // The FASM name of a logic-tile half.
 std::string slice_site_name(int half, bool is_m)
@@ -191,132 +307,11 @@ struct FasmBackend
         write_vector(name, bits, invert);
     }
 
-    struct PseudoPipKey
-    {
-        IdString tileType;
-        IdString dest;
-        IdString source;
-
-        bool operator==(const PseudoPipKey &b) const
-        {
-            return std::tie(this->tileType, this->dest, this->source) == std::tie(b.tileType, b.dest, b.source);
-        }
-
-        unsigned int hash() const { return mkhash(mkhash(tileType.hash(), source.hash()), dest.hash()); }
-    };
+    // PseudoPipKey lives in xilinx.h now: XilinxImpl::is_pip_unavail needs it
+    // too, so that the router rejects exactly the pips this writer cannot emit.
 
     dict<PseudoPipKey, std::vector<std::string>> pp_config;
-    void get_pseudo_pip_data()
-    {
-        /*
-         * Create the mapping from pseudo pip tile type, dest wire, and source wire, to
-         * the config bits set when that pseudo pip is used
-         */
-        bool is_virtex7 = boost::starts_with(ctx->args.device, "xc7v");
-        for (std::string s : {"L", "R"})
-            for (std::string s2 : {"", "_TBYTESRC", "_TBYTETERM", "_SING"})
-                for (std::string i :
-                     (s2 == "_SING") ? std::vector<std::string>{"", "0", "1"} : std::vector<std::string>{"0", "1"}) {
-                    pp_config[{ctx->id(s + "IOI3" + s2), ctx->id(s + "IOI_OLOGIC" + i + "_OQ"),
-                               ctx->id("IOI_OLOGIC" + i + "_D1")}] = {"OLOGIC_Y" + i + ".OMUX.D1",
-                                                                      "OLOGIC_Y" + i + ".OQUSED",
-                                                                      "OLOGIC_Y" + i + ".OSERDES.DATA_RATE_TQ.BUF"};
-                    pp_config[{ctx->id(s + "IOI3" + s2), ctx->id("IOI_ILOGIC" + i + "_O"),
-                               ctx->id(s + "IOI_ILOGIC" + i + "_D")}] = {"IDELAY_Y" + i + ".IDELAY_TYPE_FIXED",
-                                                                         "ILOGIC_Y" + i + ".ZINV_D"};
-                    pp_config[{ctx->id(s + "IOI3" + s2), ctx->id("IOI_ILOGIC" + i + "_O"),
-                               ctx->id(s + "IOI_ILOGIC" + i + "_DDLY")}] = {"ILOGIC_Y" + i + ".IDELMUXE3.P0",
-                                                                            "ILOGIC_Y" + i + ".ZINV_D"};
-                    pp_config[{ctx->id(s + "IOI3" + s2), ctx->id(s + "IOI_OLOGIC" + i + "_TQ"),
-                               ctx->id("IOI_OLOGIC" + i + "_T1")}] = {"OLOGIC_Y" + i + ".ZINV_T1"};
-                    if (i == "0") {
-                        pp_config[{ctx->id(s + "IOB33" + s2), id_IOB_O_IN1, id_IOB_O_OUT0}] = {};
-                        pp_config[{ctx->id(s + "IOB33" + s2), id_IOB_O_OUT0, id_IOB_O0}] = {};
-                        pp_config[{ctx->id(s + "IOB33" + s2), id_IOB_T_IN1, id_IOB_T_OUT0}] = {};
-                        pp_config[{ctx->id(s + "IOB33" + s2), id_IOB_T_OUT0, id_IOB_T0}] = {};
-                        pp_config[{ctx->id(s + "IOB33" + s2), id_IOB_DIFFI_IN0, id_IOB_PADOUT1}] = {};
-                    }
-                }
-
-        for (std::string s2 : {"", "_TBYTESRC", "_TBYTETERM", "_SING"})
-            for (std::string i : (s2 == "_SING") ? std::vector<std::string>{"0"} : std::vector<std::string>{"0", "1"}) {
-                pp_config[{ctx->id("RIOI" + s2), ctx->id("RIOI_OLOGIC" + i + "_OQ"),
-                           ctx->id("IOI_OLOGIC" + i + "_D1")}] = {"OLOGIC_Y" + i + ".OMUX.D1",
-                                                                  "OLOGIC_Y" + i + ".OQUSED",
-                                                                  "OLOGIC_Y" + i + ".OSERDES.DATA_RATE_TQ.BUF"};
-                pp_config[{ctx->id("RIOI" + s2), ctx->id("RIOI_OLOGIC" + i + "_OFB"),
-                           ctx->id("RIOI_OLOGIC" + i + "_OQ")}] = {};
-                pp_config[{ctx->id("RIOI" + s2), ctx->id("RIOI_O" + i), ctx->id("RIOI_ODELAY" + i + "_DATAOUT")}] = {};
-                pp_config[{ctx->id("RIOI" + s2), ctx->id("RIOI_OLOGIC" + i + "_OFB"),
-                           ctx->id("IOI_OLOGIC" + i + "_D1")}] = {"OLOGIC_Y" + i + ".OMUX.D1",
-                                                                  "OLOGIC_Y" + i + ".OSERDES.DATA_RATE_TQ.BUF"};
-                auto rioi_direct = PseudoPipKey{ctx->id("RIOI" + s2), ctx->id("IOI_ILOGIC" + i + "_O"),
-                                                 ctx->id("RIOI_ILOGIC" + i + "_D")};
-                auto rioi_delayed = PseudoPipKey{ctx->id("RIOI" + s2), ctx->id("IOI_ILOGIC" + i + "_O"),
-                                                  ctx->id("RIOI_ILOGIC" + i + "_DDLY")};
-                if (is_virtex7) {
-                    pp_config[rioi_direct] = {};
-                    pp_config[rioi_delayed] = {"ILOGIC_Y" + i + ".IDELMUXE3.P0"};
-                } else {
-                    pp_config[rioi_direct] = {"ILOGIC_Y" + i + ".ZINV_D"};
-                    pp_config[rioi_delayed] = {"ILOGIC_Y" + i + ".IDELMUXE3.P0", "ILOGIC_Y" + i + ".ZINV_D"};
-                }
-                pp_config[{ctx->id("RIOI" + s2), ctx->id("RIOI_OLOGIC" + i + "_TQ"),
-                           ctx->id("IOI_OLOGIC" + i + "_T1")}] = {"OLOGIC_Y" + i + ".ZINV_T1"};
-                pp_config[{ctx->id("RIOI" + s2), ctx->id("RIOI_OLOGIC" + i + "_OFB"),
-                           ctx->id("RIOI_ODELAY" + i + "_ODATAIN")}] = {"OLOGIC_Y" + i + ".ZINV_ODATAIN"};
-                if (i == "0") {
-                    pp_config[{ctx->id("RIOB18" + s2), id_IOB_O_IN1, id_IOB_O_OUT0}] = {};
-                    pp_config[{ctx->id("RIOB18" + s2), id_IOB_O_OUT0, id_IOB_O0}] = {};
-                    pp_config[{ctx->id("RIOB18" + s2), id_IOB_T_IN1, id_IOB_T_OUT0}] = {};
-                    pp_config[{ctx->id("RIOB18" + s2), id_IOB_T_OUT0, id_IOB_T0}] = {};
-                    pp_config[{ctx->id("RIOB18" + s2), id_IOB_DIFFI_IN0, id_IOB_PADOUT1}] = {};
-                }
-            }
-
-        for (std::string s1 : {"TOP", "BOT"}) {
-            for (std::string s2 : {"L", "R"}) {
-                for (int i = 0; i < 12; i++) {
-                    std::string ii = std::to_string(i);
-                    std::string hck = s2 + ii;
-                    std::string buf = std::string((s2 == "R") ? "X1Y" : "X0Y") + ii;
-                    pp_config[{ctx->id("CLK_HROW_" + s1 + "_R"), ctx->id("CLK_HROW_CK_HCLK_OUT_" + hck),
-                               ctx->id("CLK_HROW_CK_MUX_OUT_" + hck)}] = {"BUFHCE.BUFHCE_" + buf + ".IN_USE",
-                                                                          "BUFHCE.BUFHCE_" + buf + ".ZINV_CE"};
-                }
-            }
-
-            for (int i = 0; i < 16; i++) {
-                std::string ii = std::to_string(i);
-                pp_config[{ctx->id("CLK_BUFG_" + s1 + "_R"), ctx->id("CLK_BUFG_BUFGCTRL" + ii + "_O"),
-                           ctx->id("CLK_BUFG_BUFGCTRL" + ii + "_I0")}] = {
-                        "BUFGCTRL.BUFGCTRL_X0Y" + ii + ".IN_USE", "BUFGCTRL.BUFGCTRL_X0Y" + ii + ".IS_IGNORE1_INVERTED",
-                        "BUFGCTRL.BUFGCTRL_X0Y" + ii + ".ZINV_CE0", "BUFGCTRL.BUFGCTRL_X0Y" + ii + ".ZINV_S0"};
-                pp_config[{ctx->id("CLK_BUFG_" + s1 + "_R"), ctx->id("CLK_BUFG_BUFGCTRL" + ii + "_O"),
-                           ctx->id("CLK_BUFG_BUFGCTRL" + ii + "_I1")}] = {
-                        "BUFGCTRL.BUFGCTRL_X0Y" + ii + ".IN_USE", "BUFGCTRL.BUFGCTRL_X0Y" + ii + ".IS_IGNORE0_INVERTED",
-                        "BUFGCTRL.BUFGCTRL_X0Y" + ii + ".ZINV_CE1", "BUFGCTRL.BUFGCTRL_X0Y" + ii + ".ZINV_S1"};
-            }
-        }
-
-        int rclk_y_to_i[4] = {2, 3, 0, 1};
-        for (int y = 0; y < 4; y++) {
-            std::string yy = std::to_string(y);
-            std::string ii = std::to_string(rclk_y_to_i[y]);
-            pp_config[{id_HCLK_IOI3, ctx->id("HCLK_IOI_RCLK_OUT" + ii), ctx->id("HCLK_IOI_RCLK_BEFORE_DIV" + ii)}] = {
-                    "BUFR_Y" + yy + ".IN_USE", "BUFR_Y" + yy + ".BUFR_DIVIDE.BYPASS"};
-            pp_config[{id_HCLK_IOI, ctx->id("HCLK_IOI_RCLK_OUT" + ii), ctx->id("HCLK_IOI_RCLK_BEFORE_DIV" + ii)}] = {
-                    "BUFR_Y" + yy + ".IN_USE", "BUFR_Y" + yy + ".BUFR_DIVIDE.BYPASS"};
-        }
-
-        // FIXME: shouldn't these be in the X-RAY ppips database?
-        for (char c : {'L', 'R'}) {
-            for (int i = 0; i < 24; i++) {
-                pp_config[{ctx->idf("INT_INTERFACE_%c", c), ctx->idf("INT_INTERFACE_LOGIC_OUTS_%c%d", c, i),
-                           ctx->idf("INT_INTERFACE_LOGIC_OUTS_%c_B%d", c, i)}];
-            }
-        }
-    }
+    void get_pseudo_pip_data() { xlnx_build_pseudo_pip_config(ctx, pp_config); }
 
     void write_pip(PipId pip, NetInfo *net)
     {
