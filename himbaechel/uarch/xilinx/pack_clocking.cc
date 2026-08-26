@@ -105,9 +105,79 @@ void XilinxPacker::preplace_unique(CellInfo *cell)
     }
 }
 
+// Undo a global buffer sitting between an input pad and a PLL/MMCM reference
+// input.
+//
+// yosys' clkbufmap inserts a BUFG on any clock net, INCLUDING the one feeding
+// PLLE2_ADV.CLKIN1.  That is fatal rather than merely wasteful: with a BUFG in
+// the way the PLL's reference is a global-buffer output, so the dedicated
+// CCIO -> HCLK_CMT_MUX_PLLE2_CLKIN1 connection is not on any path the router
+// could take.  The router then has to drag the buffered clock back into the
+// CMT through a BUFH, and the PLL never locks -- HW-measured on the Sonata with
+// picosoc/top_pll_debug.v: the raw 25 MHz reached the fabric and nrst was
+// released, but LOCKED stayed low.  Vivado drives CLKIN1 straight from the pad
+// and uses buffers only for fabric distribution.
+//
+// It also fixes placement for free.  preplace_clocking() finds a PLL site by
+// BFS from the driver wire (find_bel_with_short_route); starting from a BUFG
+// output every PLL looks equally "dedicated", so it picked one two clock
+// regions from the pad.  Starting from the pad it finds the right site
+// unaided -- one cause behind both symptoms.
+//
+// Only bypass when the buffer is fed by an input pad, since that is exactly
+// when a dedicated path exists, and keep the buffer if anything else uses it.
+void XC7Packer::bypass_pll_input_buffers()
+{
+    const pool<IdString> gbufs{id_BUFG, id_BUFGCE, id_BUFGCTRL, id_BUFH, id_BUFHCE};
+    const pool<IdString> pads{id_IOB33_INBUF_EN, id_IOB18_INBUF_DCIEN};
+    int bypassed = 0, removed = 0;
+
+    for (auto &cell : ctx->cells) {
+        CellInfo *ci = cell.second.get();
+        if (!ci->type.in(id_PLLE2_ADV, id_PLLE2_BASE, id_MMCME2_ADV, id_MMCME2_BASE))
+            continue;
+        for (IdString port : {id_CLKIN1, id_CLKIN2}) {
+            NetInfo *ref = ci->getPort(port);
+            if (ref == nullptr || ref->driver.cell == nullptr)
+                continue;
+            CellInfo *buf = ref->driver.cell;
+            if (!gbufs.count(buf->type))
+                continue;
+            // BUFG/BUFH use I; a BUFGCTRL that has already been converted uses I0
+            NetInfo *src = buf->getPort(id_I);
+            if (src == nullptr)
+                src = buf->getPort(id_I0);
+            if (src == nullptr || src->driver.cell == nullptr)
+                continue;
+            if (!pads.count(src->driver.cell->type))
+                continue;
+
+            ci->disconnectPort(port);
+            ci->connectPort(port, src);
+            ++bypassed;
+            log_info("    %s.%s: bypassed %s '%s' to take the dedicated route from pad '%s'\n",
+                     ci->name.c_str(ctx), port.c_str(ctx), buf->type.c_str(ctx), buf->name.c_str(ctx),
+                     src->driver.cell->name.c_str(ctx));
+
+            if (ref->users.empty()) {
+                IdString bufname = buf->name;
+                for (auto &p : buf->ports)
+                    if (p.second.net != nullptr)
+                        buf->disconnectPort(p.first);
+                ctx->cells.erase(bufname);
+                ++removed;
+            }
+        }
+    }
+    if (bypassed > 0)
+        log_info("    bypassed %d gratuitous clock buffer(s) into CMT reference inputs, removed %d\n", bypassed,
+                 removed);
+}
+
 void XC7Packer::prepare_clocking()
 {
     log_info("Preparing clocking...\n");
+    bypass_pll_input_buffers();
     dict<IdString, IdString> upgrade;
     upgrade[id_MMCME2_BASE] = id_MMCME2_ADV;
     upgrade[id_PLLE2_BASE] = id_PLLE2_ADV;

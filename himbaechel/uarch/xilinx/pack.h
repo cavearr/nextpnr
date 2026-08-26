@@ -211,6 +211,7 @@ struct XC7Packer : public XilinxPacker
     void pack_gt();
 
     // Clocking
+    void bypass_pll_input_buffers();
     void prepare_clocking();
     void pack_plls();
     void pack_gbs();

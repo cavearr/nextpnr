@@ -782,7 +782,18 @@ void XilinxPacker::pack_constants()
             ci->disconnectPort(pname);
         }
 
-        if (!cval && invertible_pins.count(ci->type) && invertible_pins.at(ci->type).count(pname)) {
+        // Do NOT apply the VCC+inversion trick to the CMT blocks.  A PLLE2_ADV
+        // whose PWRDWN was tied to 0 came out as PWRDWN=VCC with
+        // IS_PWRDWN_INVERTED=1, i.e. ZINV_PWRDWN clear, where Vivado ties
+        // PWRDWN to GND and sets ZINV_PWRDWN.  Those are only equivalent if the
+        // silicon implements that pin inversion exactly as prjxray models it;
+        // on HW the PLL never locked (measured directly with
+        // picosoc/top_pll_debug.v: raw 25 MHz reached the fabric and nrst was
+        // released, but LOCKED never asserted), and this was the ONLY remaining
+        // difference from a Vivado bitstream of the same design whose PLL does
+        // lock.  Match Vivado: leave the pin tied to GND, uninverted.
+        bool is_cmt = (ci->type == id_PLLE2_ADV || ci->type == id_MMCME2_ADV);
+        if (!cval && !is_cmt && invertible_pins.count(ci->type) && invertible_pins.at(ci->type).count(pname)) {
             // Invertible pins connected to zero are optimised to a connection to Vcc (which is easier to route)
             // and an inversion
             ci->params[ctx->idf("IS_%s_INVERTED", pname.c_str(ctx))] = Property(1);
