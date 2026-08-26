@@ -1867,18 +1867,8 @@ struct FasmBackend
             write_int_vector("DIVCLK_DIVCLK_LOW_TIME[5:0]", low, 6);
             write_bit("DIVCLK_DIVCLK_EDGE[0]", edge);
             write_bit("DIVCLK_DIVCLK_NO_COUNT[0]", no_count);
-        } else {
-            // Only the OUTPUT_ENABLE is conditional on the output being used.
-            // The counter fields must be written for UNUSED outputs too: with
-            // nothing emitted they programme as HIGH_TIME=0, LOW_TIME=0,
-            // NO_COUNT=0, which is a divide of zero -- an invalid counter
-            // setting on a block that shares one lock detector across all
-            // outputs.  Vivado writes HIGH_TIME=1, LOW_TIME=1, NO_COUNT=1 on
-            // every unused CLKOUT (and no OUTPUT_ENABLE), which is exactly
-            // what the defaults here produce: divide defaults to 1, so
-            // no_count is already true and high/low are already 1.
-            if (used)
-                write_bit(name + "_CLKOUT1_OUTPUT_ENABLE[0]");
+        } else if (used) {
+            write_bit(name + "_CLKOUT1_OUTPUT_ENABLE[0]");
             write_int_vector(name + "_CLKOUT1_HIGH_TIME[5:0]", high, 6);
             write_int_vector(name + "_CLKOUT1_LOW_TIME[5:0]", low, 6);
             write_int_vector(name + "_CLKOUT1_PHASE_MUX[2:0]", phasemux, 3);
@@ -1897,23 +1887,18 @@ struct FasmBackend
         push(uarch->tile_name(ci->bel.tile));
         push("PLLE2_ADV");
         write_bit("IN_USE");
-        // The Z in prjxray's ZINV_* means the bit is the COMPLEMENT of the
-        // inversion: it is SET when the input is NOT inverted.  Every other
-        // ZINV_ in this file is written as !IS_*_INVERTED (ZINV_D, ZINV_CLK,
-        // ZINV_CE0/CE1/S0/S1, ZINV_ODATAIN ...); the PLL and MMCM blocks were
-        // the only ones missing the negation, under a FIXME wondering whether
-        // X-Ray had it wrong.  X-Ray is right.
+        // ZINV_RST / ZINV_PWRDWN: the bit SET means the pin IS inverted.
         //
-        // HW-CONFIRMED on the Sonata: PLLE2_ADV has no IS_RST_INVERTED param
-        // by default, so this emitted nothing, while Vivado's bitstream for the
-        // same design sets ZINV_RST.  With the bit clear the PLL sees RST
-        // permanently asserted and never locks, so any design gating its reset
-        // on pll_locked never leaves reset -- picosoc configured (config LED
-        // on) with its UART stuck low and its LEDs dark, and the LiteX SoC was
-        // silent for the same reason.  Both FASMs lack ZINV_RST; johnson+PLL,
-        // which works, has it.
-        write_bit("ZINV_PWRDWN", !bool_or_default(ci->params, id_IS_PWRDWN_INVERTED, false));
-        write_bit("ZINV_RST", !bool_or_default(ci->params, id_IS_RST_INVERTED, false));
+        // Do NOT "fix" this to !IS_*_INVERTED to match the other ZINV_ writes
+        // in this file.  I did, on the reasoning that Vivado emits ZINV_RST for
+        // a design whose RTL says .RST(~nrst) while we emitted nothing -- but
+        // Vivado emits it because it ABSORBS that inverter into the PLL
+        // (IS_RST_INVERTED=1), whereas we keep the inverter as fabric logic and
+        // so must leave the bit clear.  Setting it added a second inversion:
+        // HW-observed on the Sonata that the PLL then ran ONLY while the reset
+        // button was held, i.e. exactly backwards.
+        write_bit("ZINV_PWRDWN", bool_or_default(ci->params, id_IS_PWRDWN_INVERTED, false));
+        write_bit("ZINV_RST", bool_or_default(ci->params, id_IS_RST_INVERTED, false));
         write_bit("INV_CLKINSEL", bool_or_default(ci->params, id_IS_CLKINSEL_INVERTED, false));
         write_pll_clkout("DIVCLK", ci);
         write_pll_clkout("CLKFBOUT", ci);
@@ -2086,14 +2071,13 @@ struct FasmBackend
         push("MMCME2_ADV");
         write_bit("IN_USE");
         // FIXME: should be INV not ZINV (XRay error?)
-        // Same ZINV polarity fix as write_pll above.  Not independently
-        // HW-confirmed -- no MMCM design has been run here -- but these are the
-        // same four bits on the same kind of block, and leaving them inverted
-        // would hold an MMCM in reset exactly as it did the PLL.
-        write_bit("ZINV_PWRDWN", !bool_or_default(ci->params, id_IS_PWRDWN_INVERTED, false));
-        write_bit("ZINV_RST", !bool_or_default(ci->params, id_IS_RST_INVERTED, false));
-        write_bit("ZINV_PSEN", !bool_or_default(ci->params, id_IS_PSEN_INVERTED, false));
-        write_bit("ZINV_PSINCDEC", !bool_or_default(ci->params, id_IS_PSINCDEC_INVERTED, false));
+        // Same convention as write_pll above: bit SET means the pin IS
+        // inverted.  See the note there -- negating these was tried and is
+        // wrong; it inverts RST and holds the block in reset.
+        write_bit("ZINV_PWRDWN", bool_or_default(ci->params, id_IS_PWRDWN_INVERTED, false));
+        write_bit("ZINV_RST", bool_or_default(ci->params, id_IS_RST_INVERTED, false));
+        write_bit("ZINV_PSEN", bool_or_default(ci->params, id_IS_PSEN_INVERTED, false));
+        write_bit("ZINV_PSINCDEC", bool_or_default(ci->params, id_IS_PSINCDEC_INVERTED, false));
         write_bit("INV_CLKINSEL", bool_or_default(ci->params, id_IS_CLKINSEL_INVERTED, false));
         write_mmcm_clkout("DIVCLK", ci);
         write_mmcm_clkout("CLKFBOUT", ci);

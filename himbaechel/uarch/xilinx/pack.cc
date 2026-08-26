@@ -782,18 +782,15 @@ void XilinxPacker::pack_constants()
             ci->disconnectPort(pname);
         }
 
-        // Do NOT apply the VCC+inversion trick to the CMT blocks.  A PLLE2_ADV
-        // whose PWRDWN was tied to 0 came out as PWRDWN=VCC with
-        // IS_PWRDWN_INVERTED=1, i.e. ZINV_PWRDWN clear, where Vivado ties
-        // PWRDWN to GND and sets ZINV_PWRDWN.  Those are only equivalent if the
-        // silicon implements that pin inversion exactly as prjxray models it;
-        // on HW the PLL never locked (measured directly with
-        // picosoc/top_pll_debug.v: raw 25 MHz reached the fabric and nrst was
-        // released, but LOCKED never asserted), and this was the ONLY remaining
-        // difference from a Vivado bitstream of the same design whose PLL does
-        // lock.  Match Vivado: leave the pin tied to GND, uninverted.
-        bool is_cmt = (ci->type == id_PLLE2_ADV || ci->type == id_MMCME2_ADV);
-        if (!cval && !is_cmt && invertible_pins.count(ci->type) && invertible_pins.at(ci->type).count(pname)) {
+        // Do NOT exempt the CMT blocks from this.  I tried that, reasoning that
+        // Vivado ties PLLE2_ADV.PWRDWN to GND uninverted while we produce
+        // VCC+inversion, and that the two are only equivalent if the silicon
+        // implements the pin inversion as prjxray models it.  It regressed
+        // johnson+PLL, the one PLL design HW-verified through this flow: its
+        // .RST(1'b0)/.PWRDWN(1'b0) rely on exactly this conversion, and its
+        // working bitstream carries ZINV_RST and ZINV_PWRDWN as a result.
+        // Skipping the conversion drops both bits and the PLL stops running.
+        if (!cval && invertible_pins.count(ci->type) && invertible_pins.at(ci->type).count(pname)) {
             // Invertible pins connected to zero are optimised to a connection to Vcc (which is easier to route)
             // and an inversion
             ci->params[ctx->idf("IS_%s_INVERTED", pname.c_str(ctx))] = Property(1);
@@ -1001,7 +998,61 @@ void XC7Packer::pack_bram()
 
 void XilinxPacker::pack_inverters()
 {
-    // FIXME: fold where possible
+    // Fold an inverter driving a PLL/MMCM control pin into that pin's
+    // IS_<pin>_INVERTED parameter, which is what Vivado does.
+    //
+    // Without this, RTL such as .RST(~nrst) leaves the inverter as fabric logic
+    // and IS_RST_INVERTED clear, so the PLL's reset arrives over general
+    // interconnect; Vivado instead puts RST straight on the nrst net and sets
+    // the parameter (which is why its bitstreams carry ZINV_RST).  HW on the
+    // Sonata: the unfolded form never locked.  Note the FASM writer's
+    // convention -- ZINV_<pin> SET means the pin IS inverted -- so folding is
+    // what legitimately produces that bit; do not try to produce it by
+    // negating the write instead (tried; it inverts RST and the PLL then runs
+    // only while the reset button is held).
+    //
+    // Deliberately limited to the CMT blocks and to whole-signal pins: the
+    // generic invertible_pins list includes bussed pins like OPMODE[0], whose
+    // parameter is a vector rather than IS_<pin>_INVERTED, and folding those
+    // needs bit-level handling this does not attempt.
+    std::vector<IdString> dead_invs;
+    int folded = 0;
+    for (auto &cell : ctx->cells) {
+        CellInfo *ci = cell.second.get();
+        if (!ci->type.in(id_PLLE2_ADV, id_PLLE2_BASE, id_MMCME2_ADV, id_MMCME2_BASE))
+            continue;
+        for (IdString pin : {id_RST, id_PWRDWN, id_CLKINSEL}) {
+            NetInfo *n = ci->getPort(pin);
+            if (n == nullptr || n->driver.cell == nullptr)
+                continue;
+            CellInfo *drv = n->driver.cell;
+            if (drv->type != id_INV)
+                continue;
+            NetInfo *src = drv->getPort(id_I);
+            if (src == nullptr)
+                continue;
+            IdString param = ctx->idf("IS_%s_INVERTED", pin.c_str(ctx));
+            bool cur = bool_or_default(ci->params, param, false);
+            ci->disconnectPort(pin);
+            ci->connectPort(pin, src);
+            ci->params[param] = Property(cur ? 0 : 1, 1);
+            ++folded;
+            log_info("    folded inverter '%s' into %s.%s (%s=%d)\n", drv->name.c_str(ctx), ci->name.c_str(ctx),
+                     pin.c_str(ctx), param.c_str(ctx), cur ? 0 : 1);
+            if (n->users.empty())
+                dead_invs.push_back(drv->name);
+        }
+    }
+    for (IdString dn : dead_invs) {
+        CellInfo *drv = ctx->cells.at(dn).get();
+        for (auto &p : drv->ports)
+            if (p.second.net != nullptr)
+                drv->disconnectPort(p.first);
+        ctx->cells.erase(dn);
+    }
+    if (folded > 0)
+        log_info("    folded %d inverter(s) into CMT control pins\n", folded);
+
     for (auto &cell : ctx->cells) {
         CellInfo *ci = cell.second.get();
         if (ci->type == id_INV) {
