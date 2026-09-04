@@ -372,6 +372,14 @@ void XC7Packer::pack_io()
         // dedicated buffer site, then cluster the consumers (port of
         // nextpnr-xilinx pack_io_xc7.cc)
         if (buf_cell->type == id_IBUFDS_GTE2) {
+            // Both halves of the differential pair name the same buffer, so
+            // this branch is reached twice.  It used to fall out the second
+            // time because the first pass added the cell to packed_cells; now
+            // that the cell is kept, the fact that it is already bound is what
+            // says the work is done.  Without this it is constrained twice and
+            // the second bindBel asserts on an occupied bel.
+            if (buf_cell->bel != BelId())
+                continue;
             BelId pad_bel;
             if (pad_cell->attrs.count(id_BEL))
                 pad_bel = ctx->getBelByNameStr(pad_cell->attrs.at(id_BEL).as_string());
@@ -394,13 +402,21 @@ void XC7Packer::pack_io()
                 else if (usr.cell->type.in(id_BUFG, id_BUFH, id_BUFHCE, id_BUFR))
                     has_bufg_direct = true;
             }
+            // The buffer is KEPT, not packed away.  constrain_ibufds_gt_site
+            // has just bound it to a real IBUFDS_GTE2 site, and that site has
+            // configuration of its own -- IN_USE, CLKCM_CFG, CLKRCV_TRST and
+            // CLKSWING_CFG -- which fasm.cc emits by walking the bound cells.
+            // Adding it to packed_cells deletes it before that walk, so the
+            // reference-clock buffer was placed and then left switched off:
+            // the transceiver got no reference clock, the PHY's MMCMs never
+            // locked, and the board came up with a working CPU and a dead
+            // Ethernet.  Nothing reported it, because every stage had done
+            // what it was asked.
             if (gt_common) {
                 constrain_gt(pad_cell, gt_common);
-                packed_cells.insert(buf_cell->name);
                 continue;
             }
             if (has_gtxe2_channel_direct || has_bufg_direct) {
-                packed_cells.insert(buf_cell->name);
                 continue;
             }
             log_error("IBUFDS_GTE2 instance %s output port must be connected to a GTPE2_COMMON, GTXE2_COMMON, "
@@ -1181,27 +1197,51 @@ void XC7Packer::constrain_ibufds_gt_site(CellInfo *buf_cell, BelId pad_bel)
 {
     // Port of nextpnr-xilinx constrain_ibufds_gt_site: the IBUFDS_GTE2 site
     // is hardwired to the GT pad pair it buffers (GTREFCLK0 = lower buffer,
-    // GTREFCLK1 = upper), so compute the site-local y from the pad's
-    // position among the tile's four GT pads.
+    // GTREFCLK1 = upper), so compute the y from the pad's position among the
+    // tile's four GT pads.
+    //
+    // Paired on the SITE coordinates, not the tile-relative ones.  rel_y is a
+    // geometric row within the tile and does not run in the same order as the
+    // sites' own numbering: in a GTX_COMMON the pad named IPAD_X0Y0 has
+    // rel_y = 2, so pairing on rel_y sent the reference clock for pads Y0/Y1
+    // through buffer Y1 -- the half the clock does not arrive at, which is a
+    // transceiver with no reference clock and a PHY whose MMCMs never lock.
+    // Pads and buffers are numbered together in their names, and that is the
+    // pairing the silicon and Vivado both use.
     int tile = pad_bel.tile;
-    SiteIndex pad_site = uarch->get_bel_site(pad_bel);
     const auto &sites = uarch->tile_extra_data(tile)->sites;
+    // Find the pad's site by asking which site owns this bel, rather than by
+    // reading the bel's own site index.  In a GTX_COMMON the two disagree: the
+    // sites array is not ordered by coordinate (its IPADs run Y10, Y11, Y8,
+    // Y9) and the back-pointer on a pad bel lands on the wrong entry, so the
+    // pad for package pin AH8 -- IPAD_X2Y8, MGTREFCLK0 -- was read as
+    // IPAD_X2Y10, MGTREFCLK1.  Everything downstream then picked the buffer
+    // for the reference clock the board does not drive.
+    SiteIndex pad_site;
+    for (int32_t i = 0; i < int32_t(sites.ssize()); i++) {
+        if (uarch->get_site_bel(SiteIndex(tile, i), ctx->id("PAD")) == pad_bel) {
+            pad_site = SiteIndex(tile, i);
+            break;
+        }
+    }
+    if (pad_site == SiteIndex())
+        log_error("failed to find the site holding GT pad '%s'\n", ctx->nameOfBel(pad_bel));
     int32_t min_pad_y = INT_MAX, max_pad_y = 0, pad_y = -1;
     int32_t min_buf_y = INT_MAX, max_buf_y = 0, buf_x = -1;
     for (int32_t i = 0; i < int32_t(sites.ssize()); i++) {
         const auto &s = sites[i];
         std::string name = IdString(s.name_prefix).str(ctx);
         if ((name == "IPAD")) {
-            int32_t sy = s.rel_y;
+            int32_t sy = s.site_y;
             if (sy < min_pad_y) min_pad_y = sy;
             if (max_pad_y < sy) max_pad_y = sy;
             if (i == pad_site.site) pad_y = sy;
         }
         if ((name == "IBUFDS_GTE2")) {
-            int32_t sy = s.rel_y;
+            int32_t sy = s.site_y;
             if (sy < min_buf_y) min_buf_y = sy;
             if (max_buf_y < sy) max_buf_y = sy;
-            if (buf_x < 0) buf_x = s.rel_x;
+            if (buf_x < 0) buf_x = s.site_x;
         }
     }
     if (pad_y < 0)
@@ -1213,11 +1253,12 @@ void XC7Packer::constrain_ibufds_gt_site(CellInfo *buf_cell, BelId pad_bel)
     int32_t rel_buf_y = (pad_y - min_pad_y) >> 1;
     int32_t buf_y = min_buf_y + rel_buf_y;
 
+
     SiteIndex buf_site;
     for (int32_t i = 0; i < int32_t(sites.ssize()); i++) {
         const auto &s = sites[i];
         std::string name = IdString(s.name_prefix).str(ctx);
-        if ((name == "IBUFDS_GTE2") && s.rel_x == buf_x && s.rel_y == buf_y) {
+        if ((name == "IBUFDS_GTE2") && s.site_x == buf_x && s.site_y == buf_y) {
             buf_site = SiteIndex(tile, i);
             break;
         }
