@@ -161,6 +161,7 @@ struct XilinxImpl : HimbaechelAPI
     // Flow management
     void parse_xdc(const std::string &filename);
     void pack() override;
+    void apply_loc_constraints();
     void prePlace() override;
     void preRoute() override;
     void postPlace() override;

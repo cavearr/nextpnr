@@ -426,8 +426,92 @@ bool XilinxImpl::is_pip_unavail(PipId pip) const
     return false;
 }
 
+// set_property LOC <site> [get_cells <name>], for cells that are not pads.
+//
+// The XDC reader already stores LOC on any cell, but until now only pack_io
+// acted on it, so a constraint on an MMCM, a BUFG or a transceiver parsed
+// cleanly and did nothing.  That is worse than rejecting it: the design places
+// somewhere else and nothing says so.
+//
+// It matters for the clocking around a gigabit transceiver, where which CMT
+// column an MMCM sits in decides whether the GT's clocks can reach it at all.
+// The sites Vivado chooses are the ones known to work; this is how a design
+// says "put it there".
+void XilinxImpl::apply_loc_constraints()
+{
+    dict<std::pair<IdString, IdString>, BelId> by_site_and_type;
+    dict<IdString, int> site_seen;
+    for (BelId bel : ctx->getBels()) {
+        // Not every bel sits in a site the tile enumerates -- routing bels and
+        // the pseudo-bels carry an index that is not one of them -- and asking
+        // for the name of one of those walks off the end of the array.
+        SiteIndex si = get_bel_site(bel);
+        const auto &sites = tile_extra_data(si.tile)->sites;
+        if (si.site < 0 || si.site >= int32_t(sites.ssize()))
+            continue;
+        IdString site = get_site_name(si);
+        site_seen[site]++;
+        by_site_and_type.emplace(std::make_pair(site, ctx->getBelType(bel)), bel);
+    }
+
+    // Which cell wants which bel, worked out before anything moves.  Packing
+    // has already bound some of these -- clock buffers especially -- so the
+    // wanted site can be occupied by another constrained cell that has not been
+    // moved yet, and binding them one at a time collides on an ordering that
+    // means nothing.  Resolve first, then unbind everything that is in the
+    // wrong place, then bind.
+    std::vector<std::pair<CellInfo *, BelId>> wanted;
+    for (auto &cell : ctx->cells) {
+        CellInfo *ci = cell.second.get();
+        auto loc = ci->attrs.find(id_LOC);
+        if (loc == ci->attrs.end())
+            continue;
+        // A pad's LOC is a PACKAGE_PIN, not a site, and pack_io resolves it
+        // against the package rather than the tile grid.  That one belongs to
+        // pack_io; this pass is for everything else.
+        if (ci->attrs.count(id_PACKAGE_PIN))
+            continue;
+        const std::string &loc_str = loc->second.as_string();
+        // A LOC can name either a SITE (SLICE_X0Y0, MMCME2_ADV_X1Y5) or a
+        // PACKAGE PIN (C10, AH8) -- XDCs in the wild use it for both, and
+        // pack_io is what resolves the pin case against the package.  Only the
+        // site form belongs to this pass, and a site name always carries its
+        // coordinates.
+        auto xpos = loc_str.rfind("_X");
+        if (xpos == std::string::npos || loc_str.find('Y', xpos) == std::string::npos)
+            continue;
+        IdString site = ctx->id(loc_str);
+        if (!site_seen.count(site))
+            log_error("cell '%s' is constrained to site '%s', which this device does not have\n",
+                      ctx->nameOf(ci), site.c_str(ctx));
+        auto found = by_site_and_type.find(std::make_pair(site, ci->type));
+        if (found == by_site_and_type.end())
+            log_error("cell '%s' of type '%s' is constrained to site '%s', which has no bel of that type\n",
+                      ctx->nameOf(ci), ci->type.c_str(ctx), site.c_str(ctx));
+        wanted.emplace_back(ci, found->second);
+    }
+
+    for (auto &w : wanted)
+        if (w.first->bel != BelId() && w.first->bel != w.second)
+            ctx->unbindBel(w.first->bel);
+    int placed = 0;
+    for (auto &w : wanted) {
+        if (w.first->bel == w.second)
+            continue;   // packing already put it exactly there
+        if (!ctx->checkBelAvail(w.second))
+            log_error("cell '%s' is constrained to site '%s', already taken by '%s'\n", ctx->nameOf(w.first),
+                      get_site_name(get_bel_site(w.second)).c_str(ctx),
+                      ctx->nameOf(ctx->getBoundBelCell(w.second)));
+        ctx->bindBel(w.second, w.first, STRENGTH_LOCKED);
+        placed++;
+    }
+    if (placed)
+        log_info("Placed %d cell(s) from LOC constraints.\n", placed);
+}
+
 void XilinxImpl::prePlace()
 {
+    apply_loc_constraints();
     assign_cell_tags();
     index_control_sets();
     cell_tags_set = true;

@@ -2339,14 +2339,43 @@ struct FasmBackend
         Loc siteLoc = uarch->rel_site_loc(uarch->get_bel_site(ci->bel));
         push("IBUFDS_GTE2_Y" + std::to_string(siteLoc.y));
         write_bit("IN_USE");
-        auto clkcm_cfg = bool_or_default(ci->params, ctx->id("CLKCM_CFG"), true);
+        // Xilinx sources write these as the STRINGS "TRUE"/"FALSE", which is
+        // what the LiteEth PCS instantiates them with; bool_or_default wants a
+        // number and aborts the whole fasm write with "Expecting numeric value
+        // but got 'TRUE'".  The buffer then emitted IN_USE and nothing else,
+        // which is a reference clock that is switched on and unconfigured.
+        auto yes_no = [&](const char *name, bool dflt) {
+            auto it = ci->params.find(ctx->id(name));
+            if (it == ci->params.end())
+                return dflt;
+            if (it->second.is_string) {
+                const std::string &v = it->second.as_string();
+                if (v == "TRUE")
+                    return true;
+                if (v == "FALSE")
+                    return false;
+                log_error("%s: %s must be TRUE or FALSE, not '%s'\n", ci->name.c_str(ctx), name, v.c_str());
+            }
+            return it->second.as_int64() != 0;
+        };
+        auto clkcm_cfg = yes_no("CLKCM_CFG", true);
         if (!clkcm_cfg) log_warning("%s/%s: According to ug482, CLKCM_CFG should always be on\n",
                                     ci->hierpath.c_str(ctx), ci->name.c_str(ctx));
         write_bit("CLKCM_CFG", clkcm_cfg);
-        auto clkrcv_trst = bool_or_default(ci->params, ctx->id("CLKRCV_TRST"), true);
+        auto clkrcv_trst = yes_no("CLKRCV_TRST", true);
         if (!clkrcv_trst) log_warning("%s/%s: According to ug482, CLKRCV_TRST should always be on\n",
                                        ci->hierpath.c_str(ctx), ci->name.c_str(ctx));
         write_bit("CLKRCV_TRST", clkrcv_trst);
+        pop();
+        // The input swing setting lives in the tile under the GTXE2_COMMON
+        // prefix even though it belongs to this buffer, and it was only ever
+        // written by the GTXE2_COMMON writer.  A design using the per-channel
+        // CPLL instantiates no GTXE2_COMMON at all -- which is the whole point
+        // of the open SGMII PHY -- so its reference clock came out with no
+        // swing configured.
+        push("GTXE2_COMMON");
+        write_int_vector("IBUFDS_GTE2.CLKSWING_CFG[1:0]",
+                         int_or_default(ci->params, ctx->id("CLKSWING_CFG"), 3), 2);
         pop(2);
     }
     void write_gtp_pll(CellInfo *ci)
