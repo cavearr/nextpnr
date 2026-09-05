@@ -494,6 +494,20 @@ void XilinxImpl::apply_loc_constraints()
     for (auto &w : wanted)
         if (w.first->bel != BelId() && w.first->bel != w.second)
             ctx->unbindBel(w.first->bel);
+    // A wanted bel can still be occupied by a cell nobody constrained, because
+    // packing put it there before any of this ran.  A LOC is a requirement,
+    // not a preference, so the squatter yields and the placer finds it
+    // somewhere else; only another CONSTRAINED cell is a genuine conflict.
+    for (auto &w : wanted) {
+        if (ctx->checkBelAvail(w.second))
+            continue;
+        CellInfo *sitting = ctx->getBoundBelCell(w.second);
+        if (sitting == nullptr || sitting == w.first)
+            continue;
+        if (sitting->attrs.count(id_LOC))
+            continue;   // both constrained here: reported as a conflict below
+        ctx->unbindBel(w.second);
+    }
     int placed = 0;
     for (auto &w : wanted) {
         if (w.first->bel == w.second)
