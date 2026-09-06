@@ -931,6 +931,22 @@ struct FasmBackend
         std::string slew = str_or_default(pad->attrs, id_SLEW, "SLOW");
 
         Loc ioLoc = uarch->rel_site_loc(uarch->get_bel_site(pad->bel));
+
+        // Several features below describe the *other* half of this tile, which
+        // only exists to be described when nothing is bound to it.  A tile
+        // whose two halves are both driven -- the VC707's LED pairs, say --
+        // must not have either half pulled down.
+        auto partner_pad_unused = [&]() {
+            Loc bl = ctx->getBelLocation(pad->bel);
+            for (auto other : ctx->getBelsByTile(bl.x, bl.y)) {
+                if (other == pad->bel)
+                    continue;
+                CellInfo *oc = ctx->getBoundBelCell(other);
+                if (oc != nullptr && oc->type == id_PAD)
+                    return false;
+            }
+            return true;
+        };
         bool is_output = false, is_input = false;
         if (pad_net->driver.cell != nullptr)
             is_output = true;
@@ -947,7 +963,6 @@ struct FasmBackend
             iostandard.erase(iostandard.size() - 6, iostandard.size());
         }
 
-        bool is_virtex7 = boost::starts_with(ctx->args.device, "xc7v");
         bool is_riob18 = boost::starts_with(tile, "RIOB18_");
         bool is_liob18 = boost::starts_with(tile, "LIOB18_");
         bool is_hp_bank = is_riob18 || is_liob18;
@@ -957,7 +972,23 @@ struct FasmBackend
         bool is_lvcmos = boost::starts_with(iostandard, "LVCMOS");
         bool is_low_volt_lvcmos = iostandard == "LVCMOS12" || iostandard == "LVCMOS15" || iostandard == "LVCMOS18";
 
-        auto yLoc = is_sing ? (is_top_sing ? 1 : 0) : (is_virtex7 ? ioLoc.y : (1 - ioLoc.y));
+        // Within a non-SING I/O tile the two pads sit in numeric site order --
+        // the lower-numbered site is the N half of the differential pair, the
+        // upper is the P half -- but prjxray numbers the halves the other way
+        // round: IOB_Y0 is the P/master half.  So the FASM index is the
+        // complement of the relative site index, on every family.  Virtex-7
+        // was excepted here once; a golden Vivado build of examples/
+        // vc707-telegraph disproves the exception.  On that part AV40
+        // (IO_L13P, the upper site) is IOB_Y0 in Vivado's bitstream and AU36
+        // (IO_L8N, the lower site) is IOB_Y1, and the unused halves carry
+        // PULLTYPE.PULLDOWN, which says unambiguously which half is driven.
+        // With the exception in place every VC707 signal was configured onto
+        // the other half of its pair: harmless for the LEDs, which occupy both
+        // halves of their tiles, and for a reset that read a pulled-down pin,
+        // but it left the UART driving AT36 instead of AU36 and so silent.
+        // The guards below (yLoc == 0 / the hard-coded IOB_Y1 partner halves)
+        // were all written against this convention and only fire under it.
+        auto yLoc = is_sing ? (is_top_sing ? 1 : 0) : (1 - ioLoc.y);
         push("IOB_Y" + std::to_string(yLoc));
 
         bool has_diff_prefix = boost::starts_with(iostandard, "DIFF_");
@@ -993,8 +1024,17 @@ struct FasmBackend
             if (iostandard == "SSTL135")
                 write_bit("SSTL135.DRIVE.I_FIXED");
             else if (is_hp_bank) {
-                if ((iostandard == "LVCMOS18" || iostandard == "LVCMOS15"))
+                if ((iostandard == "LVCMOS18" || iostandard == "LVCMOS15")) {
                     write_bit("LVCMOS15_LVCMOS18.DRIVE.I12_I16_I2_I4_I6_I8");
+                    // Drive strength is encoded by which of several
+                    // overlapping feature bits are set, not by one bit per
+                    // level: the bit above is shared by {2,4,6,8,12,16} mA and
+                    // narrows to 12 or 8 only when this one joins it.  The
+                    // branch that writes it lived in the non-HP chain below,
+                    // so an HP-bank pad silently got some other strength.
+                    if (iostandard == "LVCMOS18" && (drive == 12 || drive == 8) && !is_sing)
+                        write_bit("LVCMOS18.DRIVE.I12_I8");
+                }
                 else if (iostandard == "LVCMOS12")
                     write_bit("LVCMOS12.DRIVE.I2_I4_I6_I8");
                 else if (iostandard == "LVDS") {
@@ -1053,8 +1093,17 @@ struct FasmBackend
                         write_bit("SSTL135.SLEW.SLOW");
                     else if (iostandard == "SSTL15")
                         write_bit("SSTL15.SLEW.SLOW");
-                    else
+                    else {
                         write_bit("LVCMOS12_LVCMOS15_LVCMOS18.SLEW.SLOW");
+                        // A left-hand HP bank sets the wide alias too -- the
+                        // input path above already does, and a golden Vivado
+                        // build of examples/vc707-telegraph sets both on every
+                        // driven LIOB18 half.  segbits_riob18.db defines no
+                        // such key, hence the LIOB18 guard.
+                        if (is_liob18)
+                            write_bit("LVCMOS12_LVCMOS15_LVCMOS18_LVCMOS25_LVCMOS33_LVTTL_SSTL135_SSTL15.SLEW."
+                                      "SLOW");
+                    }
                 }
             } else if (slew == "SLOW") {
                 if (iostandard != "LVDS_25" && iostandard != "TMDS_33")
@@ -1065,23 +1114,74 @@ struct FasmBackend
                 write_bit("SSTL135_SSTL15.SLEW.FAST");
             else
                 write_bit("LVCMOS12_LVCMOS15_LVCMOS18_LVCMOS25_LVCMOS33_LVTTL.SLEW.FAST");
+
+            // The mirror of IBUF_HP_BANK_GLUE on the input path: a driven half
+            // of a left-hand HP bank carries a bank-level glue bit.  The
+            // legacy flow's working VC707 bitstreams set it; ours did not, and
+            // examples/vc707-telegraph's golden Vivado build sets it on every
+            // driven LIOB18 output half.
+            if (is_liob18 && !is_diff && !is_sing)
+                write_bit("OBUF_HP_BANK_GLUE");
+        }
+
+        // The unused half of a tile with a driven output is not left blank:
+        // it takes the bank's slew and stepdown and is pulled down, Vivado's
+        // default for an unused pin.  This is the output-side mirror of the
+        // partner-half block in the input path below.
+        if (is_output && is_liob18 && !is_diff && !is_sing && partner_pad_unused()) {
+            std::string saved = fasm_ctx.back();
+            fasm_ctx.back() = "IOB_Y" + std::to_string(1 - yLoc);
+            write_bit("LVCMOS12_LVCMOS15_LVCMOS18_LVCMOS25_LVCMOS33_LVTTL_SSTL135_SSTL15.SLEW.SLOW");
+            write_bit("LVCMOS12_LVCMOS15_LVCMOS18.SLEW.SLOW");
+            write_bit("LVCMOS12_LVCMOS15_LVCMOS18_SSTL135_SSTL15.STEPDOWN");
+            write_bit("PULLTYPE.PULLDOWN");
+            fasm_ctx.back() = saved;
         }
 
         if (is_input) {
-            if (is_liob18 && !is_output && !is_diff && yLoc == 0) {
+            // A single-ended input on a left-hand HP bank.  Either half can
+            // hold one, but the two do not share a feature vocabulary:
+            // segbits_liob18.db defines no IOB_Y1.LVCMOS12_LVCMOS15.IN and no
+            // IOB_Y1.IBUF_HP_BANK_GLUE at all, and IOB_Y1's SSTL IN_ONLY key
+            // carries LVCMOS18 in its name where IOB_Y0's does not.  So the
+            // half decides the names, and writing IOB_Y0's on IOB_Y1 is a
+            // FasmLookupError.
+            //
+            // This was guarded `yLoc == 0` because the reference bitstream it
+            // was written from happened to have its input on the master half.
+            // An input on the slave half then got no slew and no IN_ONLY at
+            // all: on this board that was a UART that could transmit but not
+            // receive, since AU36 (TX) is the master half of its tile and
+            // AU33 (RX) is the slave half of its own.  A reset pin on a
+            // master half hid it, because a reset that reads a pulled-down
+            // pin looks exactly like a reset that works.
+            //
+            // The SING tile type has none of these keys -- only `.IN` --
+            // hence the guard against it.
+            if (is_liob18 && !is_output && !is_diff && !is_sing) {
                 write_bit("LVCMOS12_LVCMOS15_LVCMOS18_LVCMOS25_LVCMOS33_LVTTL_SSTL135_SSTL15.SLEW.SLOW");
                 write_bit("LVCMOS12_LVCMOS15_LVCMOS18.SLEW.SLOW");
-                write_bit("IBUF_HP_BANK_GLUE");
-                write_bit("LVCMOS12_LVCMOS15.IN");
-                write_bit("LVCMOS12_LVCMOS15_SSTL12_SSTL135_SSTL15.IN_ONLY");
+                if (yLoc == 0) {
+                    write_bit("IBUF_HP_BANK_GLUE");
+                    write_bit("LVCMOS12_LVCMOS15.IN");
+                    write_bit("LVCMOS12_LVCMOS15_SSTL12_SSTL135_SSTL15.IN_ONLY");
+                } else {
+                    write_bit("LVCMOS12_LVCMOS15_LVCMOS18_SSTL12_SSTL135_SSTL15.IN_ONLY");
+                }
 
-                std::string saved = fasm_ctx.back();
-                fasm_ctx.back() = "IOB_Y1";
-                write_bit("LVCMOS12_LVCMOS15_LVCMOS18_LVCMOS25_LVCMOS33_LVTTL_SSTL135_SSTL15.SLEW.SLOW");
-                write_bit("LVCMOS12_LVCMOS15_LVCMOS18.SLEW.SLOW");
-                write_bit("LVCMOS12_LVCMOS15_LVCMOS18_SSTL135_SSTL15.STEPDOWN");
-                write_bit("PULLTYPE.PULLDOWN");
-                fasm_ctx.back() = saved;
+                // The partner half, when nothing is bound to it, takes the
+                // bank's slew and stepdown and is pulled down.  Which half
+                // that is follows from this pad's, rather than being always
+                // IOB_Y1 as it was when only IOB_Y0 could reach here.
+                if (partner_pad_unused()) {
+                    std::string saved = fasm_ctx.back();
+                    fasm_ctx.back() = "IOB_Y" + std::to_string(1 - yLoc);
+                    write_bit("LVCMOS12_LVCMOS15_LVCMOS18_LVCMOS25_LVCMOS33_LVTTL_SSTL135_SSTL15.SLEW.SLOW");
+                    write_bit("LVCMOS12_LVCMOS15_LVCMOS18.SLEW.SLOW");
+                    write_bit("LVCMOS12_LVCMOS15_LVCMOS18_SSTL135_SSTL15.STEPDOWN");
+                    write_bit("PULLTYPE.PULLDOWN");
+                    fasm_ctx.back() = saved;
+                }
             }
             // Right-hand HP bank, single-ended input-only pad.  The
             // left-hand block above is the mirror of this one, but the two
@@ -1174,8 +1274,12 @@ struct FasmBackend
         // STEPDOWN is a left-hand HP feature: segbits_riob18.db defines no
         // STEPDOWN key at all, on virtex7 or kintex7, and a reference
         // bitstream for a right-hand HP input sets none.
-        if ((!is_hp_bank || (is_liob18 && is_input && !is_output && !is_diff)) &&
-            (is_low_volt_lvcmos || is_sstl)) {
+        // is_liob18 matches LIOB18_SING_* too, and the SING tile type defines
+        // neither STEPDOWN nor the LVCMOS18 drive bit -- fasm2frames stops
+        // with FasmLookupError on either.  The original guard excluded SING
+        // implicitly by only firing for inputs; widening it to outputs has to
+        // exclude SING explicitly.
+        if ((!is_hp_bank || (is_liob18 && !is_diff && !is_sing)) && (is_low_volt_lvcmos || is_sstl)) {
             if (iostandard == "SSTL12") {
                 log_error("SSTL12 is only available on high performance banks.");
             }
@@ -1231,7 +1335,7 @@ struct FasmBackend
             write_bit("OUT_DIFF");
 
         if (is_stepdown && !is_sing)
-            write_bit("IOB_Y" + std::to_string(ioLoc.y) + ".LVCMOS12_LVCMOS15_LVCMOS18_SSTL135_SSTL15.STEPDOWN");
+            write_bit("IOB_Y" + std::to_string(yLoc) + ".LVCMOS12_LVCMOS15_LVCMOS18_SSTL135_SSTL15.STEPDOWN");
 
         pop(); // tile
     }
@@ -1504,6 +1608,60 @@ struct FasmBackend
             write_bit("TMDS_33_IN_USE", hclk.second.tmds_33);
             write_bit("LVDS_25_IN_USE", hclk.second.lvds_25);
             pop();
+        }
+    }
+
+    // An input that goes straight to the fabric has no ILOGIC *cell*: the
+    // router simply passes through the ILOGIC's D -> O bypass, so
+    // write_iol_config never runs for it and the site is left unconfigured.
+    // That is not harmless.  ZINV_D is the D-input inverter control, held in
+    // the inverted sense prjxray spells "ZINV": set means NOT inverted, and
+    // clear -- the state an unconfigured site is left in -- means the fabric
+    // sees the complement of the pin.
+    //
+    // On this board that was a UART which could transmit perfectly and
+    // receive nothing but framing errors, because an inverted serial line
+    // still has edges and still clocks: it just never spells a character.
+    // Vivado sets the bit on every ILOGIC half it uses.
+    //
+    // The routing says which halves those are.  A pip into <something>_ILOGIC
+    // <n>_D is an input arriving at ILOGIC n, and the site index matches the
+    // wire's -- confirmed against a golden bitstream on both the ILOGIC and
+    // OLOGIC sides.
+    void write_ilogic_bypass_inversion()
+    {
+        for (auto &entry : pips_by_tile) {
+            int tile = entry.first;
+            std::set<int> ilogics;
+            for (const auto &wire : used_wires_starting_with(tile, "", false)) {
+                auto pos = wire.find("_ILOGIC");
+                if (pos == std::string::npos || !boost::ends_with(wire, "_D"))
+                    continue;
+                // ..._ILOGIC<n>_D -- take the digits between the two.
+                std::string index = wire.substr(pos + 7, wire.size() - (pos + 7) - 2);
+                if (index.empty() || index.find_first_not_of("0123456789") != std::string::npos)
+                    continue;
+                ilogics.insert(std::stoi(index));
+            }
+            if (ilogics.empty())
+                continue;
+            // Only three tile types define the bit: segbits_lioi.db,
+            // segbits_lioi_tbytesrc.db and segbits_lioi_tbyteterm.db.  The
+            // SING variants and every right-hand RIOI* tile have no ZINV_D at
+            // all, so an input there cannot have its inversion set from FASM
+            // -- a real gap in the database, and emitting the key anyway is
+            // only a FasmLookupError.
+            std::string tile_name = uarch->tile_name(tile);
+            if (!boost::starts_with(tile_name, "LIOI_") || boost::contains(tile_name, "_SING"))
+                continue;
+            push(tile_name);
+            for (int index : ilogics) {
+                push(stringf("ILOGIC_Y%d", index));
+                write_bit("ZINV_D");
+                pop();
+            }
+            pop();
+            blank();
         }
     }
 
@@ -4353,6 +4511,10 @@ struct FasmBackend
         write_cfg();
         write_io();
         write_routing();
+        // After write_routing: it is write_pip that fills pips_by_tile, and
+        // this pass reads the routing to find which ILOGIC halves an input
+        // passes through.
+        write_ilogic_bypass_inversion();
         write_bram();
         write_clocking();
         write_ip();
