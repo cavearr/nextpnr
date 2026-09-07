@@ -947,6 +947,31 @@ struct FasmBackend
             }
             return true;
         };
+        // Whether the tile's *other* half is also a single-ended input.  The
+        // database gives IOB_Y0 and IOB_Y1 the same bit for their low-voltage
+        // LVCMOS .IN feature, with opposite polarity, so describing both halves
+        // makes the second clear what the first set and fasm2frames rejects the
+        // pair.  Vivado emits no .IN for such a tile at all.
+        auto partner_pad_is_input = [&]() {
+            Loc bl = ctx->getBelLocation(pad->bel);
+            for (auto other : ctx->getBelsByTile(bl.x, bl.y)) {
+                if (other == pad->bel)
+                    continue;
+                CellInfo *oc = ctx->getBoundBelCell(other);
+                if (oc == nullptr || oc->type != id_PAD)
+                    continue;
+                NetInfo *on = oc->getPort(id_PAD);
+                if (on == nullptr)
+                    continue;
+                // Note: a driver does not disqualify it.  A bidirectional pad
+                // -- an SD card's cmd and data lines, say -- both drives and
+                // receives, and it is the receiving that collides here.
+                for (auto &u : on->users)
+                    if (boost::contains(u.cell->type.str(ctx), "INBUF"))
+                        return true;
+            }
+            return false;
+        };
         bool is_output = false, is_input = false;
         if (pad_net->driver.cell != nullptr)
             is_output = true;
@@ -1223,7 +1248,11 @@ struct FasmBackend
                         write_bit("IN_TERM." + pad->attrs.at(id_IN_TERM).as_string());
                 }
 
-                if (is_low_volt_lvcmos) {
+                // Skipped when the tile's other half is an input too: the two
+                // halves share this bit with opposite polarity, so writing it
+                // from both is what raises FasmInconsistentBits.  Vivado emits
+                // it for neither half in that case, which is what this matches.
+                if (is_low_volt_lvcmos && !partner_pad_is_input()) {
                     write_bit("LVCMOS12_LVCMOS15_LVCMOS18.IN");
                 }
             } else /* is_diff */ {
