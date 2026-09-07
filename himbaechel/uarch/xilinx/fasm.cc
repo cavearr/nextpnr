@@ -1187,8 +1187,15 @@ struct FasmBackend
                 write_bit("LVCMOS12_LVCMOS15_LVCMOS18_LVCMOS25_LVCMOS33_LVTTL_SSTL135_SSTL15.SLEW.SLOW");
                 write_bit("LVCMOS12_LVCMOS15_LVCMOS18.SLEW.SLOW");
                 if (yLoc == 0) {
-                    write_bit("IBUF_HP_BANK_GLUE");
-                    write_bit("LVCMOS12_LVCMOS15.IN");
+                    // The glue and .IN are skipped when the other half also
+                    // receives: they share a bit with IOB_Y1's .IN, and for a
+                    // tile of two pure inputs Vivado writes neither -- only
+                    // the IN_ONLY keys.  Taken from bit2fasm of the same SoC
+                    // (LIOB18_X81Y6), not inferred.
+                    if (!partner_pad_is_input()) {
+                        write_bit("IBUF_HP_BANK_GLUE");
+                        write_bit("LVCMOS12_LVCMOS15.IN");
+                    }
                     write_bit("LVCMOS12_LVCMOS15_SSTL12_SSTL135_SSTL15.IN_ONLY");
                 } else {
                     write_bit("LVCMOS12_LVCMOS15_LVCMOS18_SSTL12_SSTL135_SSTL15.IN_ONLY");
@@ -1248,12 +1255,26 @@ struct FasmBackend
                         write_bit("IN_TERM." + pad->attrs.at(id_IN_TERM).as_string());
                 }
 
-                // Skipped when the tile's other half is an input too: the two
-                // halves share this bit with opposite polarity, so writing it
-                // from both is what raises FasmInconsistentBits.  Vivado emits
-                // it for neither half in that case, which is what this matches.
-                if (is_low_volt_lvcmos && !partner_pad_is_input()) {
-                    write_bit("LVCMOS12_LVCMOS15_LVCMOS18.IN");
+                // The two halves share this bit, with opposite polarity, so
+                // describing it from both raises FasmInconsistentBits.  Taken
+                // from what Vivado emits for a tile whose halves both receive
+                // (bit2fasm of the same SoC): the bit is set once, from
+                // IOB_Y1, and IOB_Y0 carries IBUF_HP_BANK_GLUE instead.  One
+                // set bit serves both halves; describing it from neither
+                // leaves it clear and the inputs deaf.
+                if (is_low_volt_lvcmos) {
+                    if (!partner_pad_is_input())
+                        write_bit("LVCMOS12_LVCMOS15_LVCMOS18.IN");
+                    else if (is_output) {
+                        // Both halves drive as well as receive -- SD cmd and
+                        // data.  Vivado sets the shared bit once, from IOB_Y1,
+                        // and gives IOB_Y0 the bank glue (LIOB18_X81Y10).
+                        if (yLoc == 1)
+                            write_bit("LVCMOS12_LVCMOS15_LVCMOS18.IN");
+                        else
+                            write_bit("IBUF_HP_BANK_GLUE");
+                    }
+                    // else: two pure inputs, and Vivado describes neither.
                 }
             } else /* is_diff */ {
                 if (is_riob18) {
