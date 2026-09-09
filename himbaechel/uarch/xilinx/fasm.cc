@@ -58,28 +58,70 @@ void xlnx_build_pseudo_pip_config(Context *ctx, dict<PseudoPipKey, std::vector<s
      * the config bits set when that pseudo pip is used
      */
     bool is_virtex7 = boost::starts_with(ctx->args.device, "xc7v");
+    // Virtex-7 names the I/O column tiles LIOI/RIOI; the smaller parts name
+    // them LIOI3/RIOI3.  Getting this wrong is silent: the pseudo-pip lookup
+    // misses, the router still uses the pip, and the OLOGIC configuration that
+    // has to accompany it is simply never emitted.  That is what left the SD
+    // card's tristate path unconfigured on this board while DDR3, which sits on
+    // the right-hand column and had its own virtex7-aware block below, worked.
+    const std::string ioi = is_virtex7 ? "IOI" : "IOI3";
     for (std::string s : {"L", "R"})
         for (std::string s2 : {"", "_TBYTESRC", "_TBYTETERM", "_SING"})
             for (std::string i :
                  (s2 == "_SING") ? std::vector<std::string>{"", "0", "1"} : std::vector<std::string>{"0", "1"}) {
-                pp_config[{ctx->id(s + "IOI3" + s2), ctx->id(s + "IOI_OLOGIC" + i + "_OQ"),
+                pp_config[{ctx->id(s + ioi + s2), ctx->id(s + "IOI_OLOGIC" + i + "_OQ"),
                            ctx->id("IOI_OLOGIC" + i + "_D1")}] = {"OLOGIC_Y" + i + ".OMUX.D1",
                                                                   "OLOGIC_Y" + i + ".OQUSED",
                                                                   "OLOGIC_Y" + i + ".OSERDES.DATA_RATE_TQ.BUF"};
-                pp_config[{ctx->id(s + "IOI3" + s2), ctx->id("IOI_ILOGIC" + i + "_O"),
-                           ctx->id(s + "IOI_ILOGIC" + i + "_D")}] = {"IDELAY_Y" + i + ".IDELAY_TYPE_FIXED",
-                                                                     "ILOGIC_Y" + i + ".ZINV_D"};
-                pp_config[{ctx->id(s + "IOI3" + s2), ctx->id("IOI_ILOGIC" + i + "_O"),
-                           ctx->id(s + "IOI_ILOGIC" + i + "_DDLY")}] = {"ILOGIC_Y" + i + ".IDELMUXE3.P0",
-                                                                        "ILOGIC_Y" + i + ".ZINV_D"};
-                pp_config[{ctx->id(s + "IOI3" + s2), ctx->id(s + "IOI_OLOGIC" + i + "_TQ"),
+                // Virtex-7 encodes the ILOGIC input path differently: the direct
+                // route needs no bits at all, and neither route carries ZINV_D or
+                // IDELAY_TYPE_FIXED -- segbits_lioi.db does not even define
+                // IDELAY_Y*.IDELAY_TYPE_FIXED, so emitting it aborts fasm2frames.
+                // The RIOI block below has always known this; the left column
+                // now uses the same rule instead of its own.
+                auto ioi_direct  = PseudoPipKey{ctx->id(s + ioi + s2), ctx->id("IOI_ILOGIC" + i + "_O"),
+                                                ctx->id(s + "IOI_ILOGIC" + i + "_D")};
+                auto ioi_delayed = PseudoPipKey{ctx->id(s + ioi + s2), ctx->id("IOI_ILOGIC" + i + "_O"),
+                                                ctx->id(s + "IOI_ILOGIC" + i + "_DDLY")};
+                if (is_virtex7) {
+                    pp_config[ioi_direct]  = {};
+                    pp_config[ioi_delayed] = {"ILOGIC_Y" + i + ".IDELMUXE3.P0"};
+                } else {
+                    pp_config[ioi_direct]  = {"IDELAY_Y" + i + ".IDELAY_TYPE_FIXED",
+                                              "ILOGIC_Y" + i + ".ZINV_D"};
+                    pp_config[ioi_delayed] = {"ILOGIC_Y" + i + ".IDELMUXE3.P0",
+                                              "ILOGIC_Y" + i + ".ZINV_D"};
+                }
+                pp_config[{ctx->id(s + ioi + s2), ctx->id(s + "IOI_OLOGIC" + i + "_TQ"),
                            ctx->id("IOI_OLOGIC" + i + "_T1")}] = {"OLOGIC_Y" + i + ".ZINV_T1"};
+                // The entry above only fires when the route crosses OLOGIC's
+                // T1->TQ transit as a tile pip, which is how DDR3 reaches the
+                // right column.  With router2 and a plain tristate buffer the
+                // transit is internal to the bel and no pip is emitted, so the
+                // inversion bit was never written and the pad's output enable
+                // came out backwards -- the FPGA drove the SD bus exactly when
+                // the card was trying to answer.  The pad-side pip below is
+                // present precisely when OLOGIC drives the pad's tristate, and
+                // reproduces the ZINV_T1 set that bit2fasm extracts from the
+                // working Vivado bitstream, including only IOB_Y1 of the
+                // TBYTESRC tile, where sdcard_clk needs no tristate at all.
+                pp_config[{ctx->id(s + ioi + s2), ctx->id(s + "IOI_T" + i),
+                           ctx->id(s + "IOI_OLOGIC" + i + "_TQ")}] = {"OLOGIC_Y" + i + ".ZINV_T1"};
                 if (i == "0") {
                     pp_config[{ctx->id(s + "IOB33" + s2), id_IOB_O_IN1, id_IOB_O_OUT0}] = {};
                     pp_config[{ctx->id(s + "IOB33" + s2), id_IOB_O_OUT0, id_IOB_O0}] = {};
                     pp_config[{ctx->id(s + "IOB33" + s2), id_IOB_T_IN1, id_IOB_T_OUT0}] = {};
                     pp_config[{ctx->id(s + "IOB33" + s2), id_IOB_T_OUT0, id_IOB_T0}] = {};
                     pp_config[{ctx->id(s + "IOB33" + s2), id_IOB_DIFFI_IN0, id_IOB_PADOUT1}] = {};
+                    // ...and the same set for the 1.8V banks, on both columns.
+                    // RIOB18 is also registered in the RIOI block below; the
+                    // values are identical, so registering it here as well is
+                    // harmless and keeps the two columns symmetric.
+                    pp_config[{ctx->id(s + "IOB18" + s2), id_IOB_O_IN1, id_IOB_O_OUT0}] = {};
+                    pp_config[{ctx->id(s + "IOB18" + s2), id_IOB_O_OUT0, id_IOB_O0}] = {};
+                    pp_config[{ctx->id(s + "IOB18" + s2), id_IOB_T_IN1, id_IOB_T_OUT0}] = {};
+                    pp_config[{ctx->id(s + "IOB18" + s2), id_IOB_T_OUT0, id_IOB_T0}] = {};
+                    pp_config[{ctx->id(s + "IOB18" + s2), id_IOB_DIFFI_IN0, id_IOB_PADOUT1}] = {};
                 }
             }
 
@@ -376,6 +418,20 @@ struct FasmBackend
             if (tile_is_clk_bufg_r && !bufgctrl_tile_guard(pip.tile))
                 return;
             for (auto c : pp) {
+                // The OMUX bypass and a bound output register are mutually
+                // exclusive: OMUX.D1 routes the pad from the combinational D1
+                // input, so asserting it on a site holding an ODDR drives the
+                // pad from the unregistered signal and throws away the fixed
+                // clock-to-out that putting a register at the pad buys.  The
+                // cell writer has already emitted OQUSED and the DDR rate for
+                // that site; only the mux selection has to be withheld.
+                // write_io runs before write_routing, so the set is populated.
+                if (boost::contains(c, ".OMUX.")) {
+                    auto dot = c.find('.');
+                    if (dot != std::string::npos &&
+                        ologic_registered.count(tile_name + "/" + c.substr(0, dot)))
+                        continue;
+                }
                 if (boost::starts_with(tile_name, "RIOI3_SING") || boost::starts_with(tile_name, "LIOI3_SING") ||
                     boost::starts_with(tile_name, "RIOI_SING")) {
                     // Need to flip for top HCLK
@@ -1390,6 +1446,15 @@ struct FasmBackend
         pop(); // tile
     }
 
+    // OLOGIC sites holding an output register, as "TILE/OLOGIC_Yn".  The
+    // pseudo-pip that carries a signal through the OLOGIC sets OMUX.D1, which
+    // selects the combinational D1->pad bypass.  That is right when the site is
+    // a wire, and wrong when it holds an ODDR: the pad would be driven from the
+    // unregistered input instead of the register's output, quietly undoing the
+    // reason for putting a register at the pad at all.  Vivado sets OQUSED and
+    // the DDR rate and leaves OMUX alone.
+    std::set<std::string> ologic_registered;
+
     void write_iol_config(CellInfo *ci)
     {
         std::string tile = uarch->tile_name(ci->bel.tile);
@@ -1401,7 +1466,11 @@ struct FasmBackend
         std::string site = uarch->get_site_name(site_key).str(ctx);
         std::string sitetype = site.substr(0, site.find('_'));
         Loc siteloc = uarch->rel_site_loc(site_key);
-        push(stringf("%s_Y%d", sitetype.c_str(), is_sing ? (is_top_sing ? 1 : 0) : (1 - siteloc.y)));
+        std::string site_y = stringf("%s_Y%d", sitetype.c_str(),
+                                     is_sing ? (is_top_sing ? 1 : 0) : (1 - siteloc.y));
+        push(site_y);
+        if (ci->type.in(id_OLOGICE2_OUTFF, id_OLOGICE3_OUTFF))
+            ologic_registered.insert(tile + "/" + site_y);
 
         if (ci->type == id_ILOGICE3_IFF) {
             write_bit("IDDR.IN_USE");
