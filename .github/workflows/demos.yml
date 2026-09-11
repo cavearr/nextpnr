@@ -329,6 +329,32 @@ jobs:
             die: xc7vx485t
             timeout: 300
 
+          # The second Linux SoC, and not merely the first with more cores:
+          # VexRiscv-SMP carries a RISC-V CLINT and PLIC, where the
+          # single-core variant has neither -- its whole peripheral set is a
+          # LiteX timer and a UART, and its machine-mode layer is LiteX's
+          # emulator rather than OpenSBI.  Different clock structure,
+          # different interrupt fabric, ~20% more logic: a change that breaks
+          # one and not the other is worth looking at.
+          #
+          # It answers to 10:e2:d5:53:4d:50 -- "SMP" in the low three bytes --
+          # rather than sharing 00:00:07 with its sibling.  The MAC is
+          # compiled into the gateware and names the TFTP directory the BIOS
+          # boots from, so two SoCs sharing one silently share a payload
+          # directory.  Nothing in CI boots these, but the netlists are the
+          # same ones used on hardware and the distinction is easier to keep
+          # than to reintroduce.
+          - name: vc707-litex-linux-smp
+            tier: stretch
+            source: netlist
+            design: vc707-litex-linux-smp
+            netlist: xilinx_vc707.json.gz
+            xdc: xilinx_vc707.xdc
+            family: virtex7
+            part: xc7vx485tffg1761-2
+            die: xc7vx485t
+            timeout: 300
+
     steps:
       - uses: actions/checkout@v4
         with:
