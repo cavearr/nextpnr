@@ -1,32 +1,79 @@
-# Regression gate: build a representative demo-project subset against
-# THIS PR's himbaechel/xilinx code + openXC7 prjxray-db, and verify the
-# resulting bitstream frames against committed goldens.
+# Regression gate: build a representative design set against THIS PR's
+# himbaechel/xilinx code + openXC7 prjxray-db, and verify the resulting
+# bitstream frames against committed goldens.
 #
 # Why it exists: the openXC7 demo-projects CI builds against the
-# toolchain-nix pin of nextpnr-xilinx, so a nextpnr PR never exercises
-# the xc7 demos.  This workflow closes that gap for the PR itself:
+# toolchain-nix pin of nextpnr-xilinx, so a nextpnr PR never exercises the
+# xc7 demos.  This workflow closes that gap for the PR itself.
 #
-#   1. builds nextpnr-himbaechel from the PR (ARCH=himbaechel,
-#      HIMBAECHEL_UARCH=xilinx)
-#   2. builds the chipdbs for the parts the demo subset needs, from
-#      openXC7/prjxray-db
-#   3. builds xc7frames2bit from openXC7/prjxray
-#   4. runs the demos with the PR binary through a CLI shim
-#      (.github/scripts/nextpnr-xilinx-shim.sh), pinned --seed
-#   5. compares the sha256 of each produced .frames file against
-#      .github/goldens/<project>.sha256
-#   6. publishes the built bitstreams as artifacts
+# TIERS
 #
-# Golden policy (porting plan WP9.3): goldens are the expected output of
-# THIS repo's himbaechel/xilinx implementation, generated with the pinned
-# prjxray-db revision, a fixed P&R seed, and a pinned Eigen toolchain.
-# The analytic placer (common/place/placer_heap.cc) solves a sparse linear
-# system with Eigen's iterative solver, and its floating-point numerics
-# differ between Eigen major versions (e.g. 3.4.x vs 5.0.x), so the large
-# litex goldens only reproduce on the exact Eigen the goldens were made with
-# (5.0.1 = gitlab tag 5.0.1, commit bc3b3987).  A mismatch fails the gate:
-# if the change intentionally alters FASM output, re-golden the affected
-# project (see the failure message) and review the diff.
+#   essential -- small, fast designs plus the five demo projects.  Every
+#     entry is goldened and blocking.  This is the list that has to stay
+#     green: between them they cover artix7, spartan7, kintex7 and virtex7,
+#     both I/O banks, the clocking column, BRAM, carry and DSP.
+#
+#   stretch -- LiteX Linux-capable SoCs.  Large (tens of minutes of P&R),
+#     not goldened, and NON-BLOCKING (continue-on-error).  They exist to
+#     catch the failures that only appear at scale: router congestion,
+#     placer timeouts, and cell shapes no small design instantiates.  A
+#     stretch failure is a bug report, not a merge blocker.
+#
+# WHY ONE PRJXRAY REVISION (this replaces the separate virtex7 workflow)
+#
+# The Virtex-7 designs used to live in their own workflow because
+# fasm2frames at the old demos pin (ef5203e9) cannot assemble a Virtex-7
+# design at all -- it has no tileinfo for the XC7V HCLK_IOI3 tiles and dies
+# with KeyError: 'HCLK_IOI3_X82Y130'.  e1302fc6 handles virtex7 and is very
+# nearly bit-identical on the older families: measured on this repo's own
+# output, blinky-digilent-arty (artix7) and blinky-qmtech (kintex7) produce
+# byte-identical frames under both revisions, and
+# litex-ddr-qmtech-kintex7 differs in exactly 6 frames of one IOB column
+# (0x00402F9D..0x00402FA7).  That difference is deliberate: e1302fc6's
+# grid.py prefers a tile type's own segbits database over the alias path,
+# because on IOB SING tiles the alias metadata names the wrong site and
+# misplaces the words, silently corrupting neighbouring tiles' frames.  The
+# kintex7 golden therefore moved with the pin, and the frames it produces
+# now are the more correct ones.  One revision for every family is worth
+# more than a bit-for-bit-frozen old one.
+#
+# GOLDEN POLICY
+#
+# Goldens are the expected output of THIS repo's himbaechel/xilinx
+# implementation, at the pinned prjxray-db revision, with a fixed P&R seed
+# where one is passed, and a pinned Eigen.  placer_heap solves a sparse
+# system with Eigen's iterative solver and its numerics differ between
+# Eigen major versions, so the large goldens only reproduce on the Eigen
+# they were made with (5.0.1, gitlab tag 5.0.1 = bc3b3987).  A mismatch
+# fails the gate: if a change intentionally alters FASM output, re-golden
+# the affected entry and say in the commit message which features moved
+# and why.
+#
+# The FASM itself is not hashed: its first line carries the git description
+# of the binary that wrote it, so it changes on every commit.  fasm2frames
+# drops comments, so the frames hash is stable across no-op commits.
+#
+# KNOWN LIMITATION: yosys is not pinned
+#
+# The `example` and `litex-linux` entries synthesise with the runner's apt
+# yosys, which is not pinned, while the example entries are goldened.  A
+# yosys package bump in the runner image can therefore move an example's
+# frames with no nextpnr change at all, and the failure will look like a
+# regression in this repo.  The fix is to commit each example's stripped
+# netlist (.github/scripts/strip-netlist-blackboxes.py exists for exactly
+# that, and reduces ~10 MB of blackbox declarations to tens of kB) and stop
+# running yosys for goldened entries.  That is deliberately not done here:
+# it would re-record every existing example golden in a change whose
+# subject is something else.  The stretch entries are unaffected, having no
+# goldens.
+#
+# SEEDS
+#
+# The demo projects pass --seed.  The vc707 examples deliberately do not:
+# their goldens were produced with the default RNG state, and passing
+# --seed with the default VALUE is not equivalent -- DeterministicRNG()
+# seeds rngstate directly, while rngseed() also advances the generator five
+# steps.  Adding a seed there changes the placement and invalidates them.
 
 name: demos
 
@@ -43,58 +90,245 @@ permissions:
 
 env:
   # Pinned to make the gate reproducible: the chipdb is generated from
-  # prjxray-db and the frames from prjxray's fasm2frames/xc7frames2bit,
-  # so a moving database or tool revision would break golden matching.
+  # prjxray-db and the frames from prjxray's fasm2frames, so a moving
+  # database or tool revision would break golden matching.
   PRJXRAY_DB_REV: ab1fc60c38a0dc1bc1d3d495f3189b25ae971e04
-  PRJXRAY_REV: ef5203e9d06e9ffda79168439723579217ca8110
+  # virtex7-capable fasm2frames, used for every family; see header
+  PRJXRAY_REV: e1302fc6f8662a237e42790073fa641f2d9f1371
   # demo-projects commit carrying the five pre-synthesized .json netlists
-  # (yosys 0.67 synthesis outputs; the gate reuses them, no yosys on runner).
+  # (yosys 0.67 synthesis outputs; the gate reuses them, no yosys needed
+  # for those entries)
   DEMO_PROJECTS_REV: 2713a8eb5f94abcceb50431405e8733c61a0b270
 
 jobs:
   demos:
-    name: ${{ matrix.project }}
+    name: ${{ matrix.tier }} / ${{ matrix.name }}
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    continue-on-error: ${{ matrix.tier == 'stretch' }}
+    timeout-minutes: ${{ matrix.timeout }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - family: spartan7
-            upper: SPARTAN7
-            part: xc7s50csga324-1
-            die: xc7s50
-            project: litex-ddr-arty-s7
-            top: digilent_arty_s7
-            seed: 1
-          - family: spartan7
-            upper: SPARTAN7
-            part: xc7s50csga324-1
-            die: xc7s50
-            project: litex-minimal-arty-s7
-            top: digilent_arty_s7
-            seed: 1
-          - family: artix7
+          # ---------------------------------------------------------------
+          # essential / small items.  Each one is here because it is the
+          # only thing in the gate that reaches some specific path; the
+          # comment says which.  Keep them small -- the point is that a
+          # broken path is identified in minutes, by name.
+          # ---------------------------------------------------------------
+
+          # IBUFDS receiver + one BUFG that lands in a CLK_BUFG_TOP_R tile.
+          # The reference case: xc7-bitstream-tools builds the same design
+          # from its own checkout and gets a byte-identical FASM, and it is
+          # the only entry with a legacy-flow feature set to compare to.
+          - name: vc707-johnson
+            tier: essential
+            source: example
+            design: vc707-johnson
+            family: virtex7
+            part: xc7vx485tffg1761-2
+            die: xc7vx485t
+            timeout: 90
+
+          # HP-bank differential driver (OBUFDS) and bidirectional pad
+          # (IOBUFDS, DIFF_SSTL15).  The bidirectional shape is the one
+          # that made fasm2frames reject litex-ddr-qmtech-kintex7 before
+          # the receiver slew line was guarded on !is_output.
+          - name: vc707-hp-diffio
+            tier: essential
+            source: example
+            design: vc707-hp-diffio
+            family: virtex7
+            part: xc7vx485tffg1761-2
+            die: xc7vx485t
+            timeout: 90
+
+          # ILOGIC delayed input: the RIOI pseudo-pip emitting
+          # ILOGIC_Y<i>.IDELMUXE3.P0.  No FASM from any demo project
+          # contains an IDELMUXE3 line, so without this the XC7V branch of
+          # that mapping is asserted from the database alone.
+          - name: vc707-idelay
+            tier: essential
+            source: example
+            design: vc707-idelay
+            family: virtex7
+            part: xc7vx485tffg1761-2
+            die: xc7vx485t
+            timeout: 90
+
+          # Several bound BUFGCTRLs across the CLK_BUFG column.  This is
+          # the entry that distinguishes a phantom-BUFGCTRL guard which
+          # admits the real sites from one that suppresses them: the two
+          # halves of the column are numbered differently (BOT holds
+          # BUFGCTRL_X0Y0..15, TOP holds X0Y16..31).
+          - name: vc707-multibufg
+            tier: essential
+            source: example
+            design: vc707-multibufg
+            family: virtex7
+            part: xc7vx485tffg1761-2
+            die: xc7vx485t
+            timeout: 90
+
+          # A carry position whose sum AND whose carry-out both feed fabric.
+          # The subslice has two exits -- the hardwired direct pin and the
+          # configurable xMUX -- so this is legal, and a packer that charges
+          # both to the mux rejects it.  No demo project reaches the shape:
+          # their carry chains consume each carry-out internally.
+          - name: vc707-carry
+            tier: essential
+            source: example
+            design: vc707-carry
+            family: virtex7
+            part: xc7vx485tffg1761-2
+            die: xc7vx485t
+            timeout: 90
+
+          # Block RAM with per-byte write enables, spanning two RAMB36E1s so
+          # the byte lanes are split across primitives.  This is the write
+          # path every LiteX design depends on, and the one where a memory
+          # lowering that ORs the write-enables together still builds.
+          - name: vc707-bram
+            tier: essential
+            source: example
+            design: vc707-bram
+            family: virtex7
+            part: xc7vx485tffg1761-2
+            die: xc7vx485t
+            timeout: 90
+
+          # MMCM with one output that leaves CLKOUT*_PHASE unset, so the
+          # writer's default is actually consulted.  Every MMCM in every
+          # demo project sets all its phases explicitly, which is why a
+          # default of 1 degree instead of UG472's 0 went unnoticed.
+          - name: vc707-mmcm
+            tier: essential
+            source: example
+            design: vc707-mmcm
+            family: virtex7
+            part: xc7vx485tffg1761-2
+            die: xc7vx485t
+            timeout: 90
+
+          # DSP48E1 multiply-accumulate: the DSP config writer has no other
+          # coverage here (no blinky has a multiplier and the LiteX SoCs in
+          # this gate are built without one).
+          - name: vc707-dsp
+            tier: essential
+            source: example
+            design: vc707-dsp
+            family: virtex7
+            part: xc7vx485tffg1761-2
+            die: xc7vx485t
+            timeout: 90
+
+          # ---------------------------------------------------------------
+          # essential / demo projects (pre-synthesized netlists)
+          # ---------------------------------------------------------------
+
+          # Smallest artix7 end-to-end path.
+          - name: blinky-digilent-arty
+            tier: essential
+            source: demo-project
+            project: blinky-digilent-arty
+            top: blinky
+            family: artix7
             upper: ARTIX7
             part: xc7a35tcsg324-1
             die: xc7a50t
-            project: blinky-digilent-arty
-            top: blinky
             seed: 1
-          - family: kintex7
-            upper: KINTEX7
-            part: xc7k325tffg676-1
-            die: xc7k325t
+            timeout: 60
+
+          # Smallest kintex7 end-to-end path.
+          - name: blinky-qmtech
+            tier: essential
+            source: demo-project
             project: blinky-qmtech
             top: blinky
-            seed: 1
-          - family: kintex7
+            family: kintex7
             upper: KINTEX7
             part: xc7k325tffg676-1
             die: xc7k325t
+            seed: 1
+            timeout: 60
+
+          # spartan7: the only family whose device model was, until
+          # recently, wrong enough to freeze real hardware (openXC7 #177).
+          # Two entries because the DDR one reaches the memory controller
+          # and the minimal one is the fast smoke test.
+          - name: litex-minimal-arty-s7
+            tier: essential
+            source: demo-project
+            project: litex-minimal-arty-s7
+            top: digilent_arty_s7
+            family: spartan7
+            upper: SPARTAN7
+            part: xc7s50csga324-1
+            die: xc7s50
+            seed: 1
+            timeout: 120
+
+          - name: litex-ddr-arty-s7
+            tier: essential
+            source: demo-project
+            project: litex-ddr-arty-s7
+            top: digilent_arty_s7
+            family: spartan7
+            upper: SPARTAN7
+            part: xc7s50csga324-1
+            die: xc7s50
+            seed: 1
+            timeout: 180
+
+          # Largest goldened entry: LiteX + DDR3 on kintex7.  This is the
+          # one whose frames moved with the prjxray pin (see header).
+          - name: litex-ddr-qmtech-kintex7
+            tier: essential
+            source: demo-project
             project: litex-ddr-qmtech-kintex7
             top: qmtech_xc7k325t
+            family: kintex7
+            upper: KINTEX7
+            part: xc7k325tffg676-1
+            die: xc7k325t
             seed: 2
+            timeout: 180
+
+          # ---------------------------------------------------------------
+          # stretch / LiteX Linux.  Non-blocking, not goldened.  These are
+          # the designs that boot a kernel, and they are two orders of
+          # magnitude larger than anything above: they fail in ways small
+          # designs cannot (router congestion floors, placer timeouts,
+          # int32 overflow in the HeAP cell budget).  Success criterion is
+          # only that P&R completes and the FASM assembles.
+          # ---------------------------------------------------------------
+
+          # The stretch netlist comes from a build that was flashed to a
+          # VC707 and watched boot, not from a configuration that merely
+          # elaborates.  That matters more here than anywhere else in the
+          # gate: a LiteX SoC with a zeroed ROM, a dead clock or a
+          # miscalibrated DDR3 PHY places, routes, assembles and configures
+          # with DONE asserted, and is distinguishable from a working one
+          # only on a board.
+          #
+          # It ships as a netlist rather than as sources because this is the
+          # nextpnr repository: generating the SoC here would put a LiteX
+          # version, a yosys version and a RISC-V toolchain between a code
+          # change and a result.  The netlist carries the BIOS too -- yosys
+          # resolves the ROM's $readmemh into RAMB INIT words at synthesis
+          # time -- so it needs no compiler.  29.2 MB raw, 1.9 MB gzipped in
+          # the tree.
+          - name: vc707-litex-linux
+            tier: stretch
+            source: netlist
+            design: vc707-litex-linux
+            netlist: xilinx_vc707.json.gz
+            xdc: xilinx_vc707.xdc
+            family: virtex7
+            part: xc7vx485tffg1761-2
+            die: xc7vx485t
+            timeout: 300
+
     steps:
       - uses: actions/checkout@v4
         with:
@@ -117,6 +351,7 @@ jobs:
           submodules: recursive
 
       - name: Checkout demo-projects
+        if: matrix.source == 'demo-project'
         uses: actions/checkout@v4
         with:
           repository: openXC7/demo-projects
@@ -125,9 +360,10 @@ jobs:
 
       # actions/checkout writes files in index order, so a .v checked out a
       # second after its committed .json would look "older" to make and the
-      # %.json rule would fire (needs yosys, which the runner does not have).
-      # Touch every committed .json so make always treats them as up to date.
-      - name: Keep committed JSONs newer than sources (no yosys in gate)
+      # %.json rule would fire (needs yosys, which this job may not have).
+      # Touch every committed .json so make always treats them as current.
+      - name: Keep committed JSONs newer than sources
+        if: matrix.source == 'demo-project'
         run: find demo-projects -name '*.json' -exec touch {} +
 
       - uses: actions/setup-python@v5
@@ -140,6 +376,10 @@ jobs:
           sudo apt-get install -y git make cmake libboost-all-dev python3-dev
           pip install fasm intervaltree progressbar2 simplejson pyyaml
 
+      - name: Install yosys
+        if: matrix.source == 'example'
+        run: sudo apt-get install -y yosys
+
       # Eigen is header-only; build it from the exact gitlab tag the goldens
       # were generated with.  nextpnr uses find_package(Eigen3 NO_MODULE), so
       # CMAKE_PREFIX_PATH below makes this install win over the system Eigen.
@@ -151,19 +391,36 @@ jobs:
             -DBUILD_TESTING=OFF -DEIGEN_BUILD_BLAS=OFF -DEIGEN_BUILD_LAPACK=OFF
           cmake --install /tmp/eigen-build
 
+      # The xc7vx485t .bba is ~345 MB and takes the bulk of a virtex7 job's
+      # wall time to generate.  It depends only on the generator, the
+      # constids and the pinned database, so key the cache on exactly those.
+      - name: Chipdb cache key
+        id: chipdb-key
+        run: |
+          h=$(cat nextpnr/himbaechel/uarch/xilinx/gen/xilinx_gen.py \
+                  nextpnr/himbaechel/uarch/xilinx/constids.inc | sha256sum | cut -c1-16)
+          echo "key=${{ matrix.die }}-bba-${{ env.PRJXRAY_DB_REV }}-$h" >> "$GITHUB_OUTPUT"
+
+      - name: Cache chipdb .bba
+        uses: actions/cache@v4
+        with:
+          path: build/himbaechel/uarch/xilinx/chipdb-${{ matrix.die }}.bba
+          key: ${{ steps.chipdb-key.outputs.key }}
+
       - name: Build nextpnr-himbaechel from this PR
         run: |
-          cmake -S nextpnr -B build-pr \
+          cmake -S nextpnr -B build \
             -DARCH=himbaechel -DHIMBAECHEL_UARCH=xilinx \
             -DBUILD_GUI=OFF -DBUILD_PYTHON=OFF \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_PREFIX_PATH=/tmp/eigen-install \
             -DHIMBAECHEL_PRJXRAY_DB="$GITHUB_WORKSPACE/prjxray-db" \
             -DHIMBAECHEL_XILINX_DEVICES="${{ matrix.die }}"
-          cmake --build build-pr --parallel 4
-          # make the binary + shim available to the demo Makefiles
+          free -h
+          cmake --build build --parallel 4
+          free -h
           mkdir -p bin
-          cp build-pr/nextpnr-himbaechel bin/
+          cp build/nextpnr-himbaechel bin/
           cp nextpnr/.github/scripts/nextpnr-xilinx-shim.sh bin/nextpnr-xilinx
           chmod +x bin/nextpnr-xilinx
           echo "$GITHUB_WORKSPACE/bin" >> "$GITHUB_PATH"
@@ -180,12 +437,60 @@ jobs:
           CXXFLAGS="-include stdint.h -Wno-free-nonheap-object" \
             cmake -S . -B build-prjxray -DCMAKE_BUILD_TYPE=Release
           cmake --build build-prjxray --target xc7frames2bit --parallel 4
-          ln -s "$GITHUB_WORKSPACE/prjxray/utils/fasm2frames.py" "$GITHUB_WORKSPACE/bin/fasm2frames"
-          chmod +x "$GITHUB_WORKSPACE/bin/fasm2frames"
           cp build-prjxray/tools/xc7frames2bit "$GITHUB_WORKSPACE/bin/"
           echo "PYTHONPATH=$GITHUB_WORKSPACE/prjxray" >> "$GITHUB_ENV"
 
-      - name: Build demos
+      # ---------------- source: example ----------------
+
+      - name: Synthesize, place and route (example)
+        if: matrix.source == 'example'
+        env:
+          EX: nextpnr/himbaechel/uarch/xilinx/examples/${{ matrix.design }}
+        run: |
+          mapfile -t sources < <(find "$EX" -maxdepth 1 -name '*.v' -print | sort)
+          yosys -p "read_verilog -lib +/xilinx/cells_sim.v; \
+                    read_verilog ${sources[*]}; \
+                    synth_xilinx -top top; \
+                    write_json ${{ matrix.name }}.json"
+          # An example may be in the gate precisely because it does NOT
+          # build: a minimal reproducer for a defect is worth more pinned
+          # than deleted.  Those carry a recorded P&R failure, and the job
+          # passes only while the failure is EXACTLY the recorded one --
+          # including failing if it disappears, which means the defect is
+          # fixed and the design is ready for a real golden.
+          # GitHub runs steps with bash -e but NOT pipefail, so `if cmd |
+          # tee log` tests tee's status and a failing cmd reads as success.
+          # Every known-failure branch below depends on seeing the real one.
+          set -o pipefail
+          known="nextpnr/.github/references/${{ matrix.name }}.pnr-known-failure"
+          # no --seed here on purpose; see the SEEDS note in the header
+          if ./build/nextpnr-himbaechel \
+               --device ${{ matrix.part }} \
+               -o xdc="$EX/top.xdc" \
+               --json "${{ matrix.name }}.json" \
+               -o fasm="${{ matrix.name }}.fasm" \
+               --router router2 2>&1 | tee pnr.log; then
+            if [ -f "$known" ]; then
+              echo "::error::${{ matrix.name }} now places and routes, but a known"
+              echo "P&R failure is still recorded in $known.  If the defect is"
+              echo "fixed, delete that file and let the golden step record a hash."
+              exit 1
+            fi
+          else
+            if [ -f "$known" ] && grep -qFf "$known" pnr.log; then
+              echo "known P&R defect reproduced: $(grep -m1 -Ff "$known" pnr.log)"
+              echo "PNR_KNOWN_FAILURE=1" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            echo "::error::place and route failed for ${{ matrix.name }}"
+            tail -20 pnr.log
+            exit 1
+          fi
+
+      # ---------------- source: demo-project ----------------
+
+      - name: Build demo project
+        if: matrix.source == 'demo-project'
         env:
           UPPER: ${{ matrix.upper }}
           SEED: ${{ matrix.seed }}
@@ -193,10 +498,8 @@ jobs:
           export ${UPPER}_CHIPDB="$GITHUB_WORKSPACE/chipdb"
           mkdir -p "$GITHUB_WORKSPACE/chipdb"
           # openXC7.mk resolves the chipdb as <part-minus-speed>.bin; our
-          # build produces chipdb-<die>.bin.  Copy under the expected name
-          # (the shim passes --chipdb plus a part-form --device, and the
-          # die/packageless device names are accepted by the uarch).
-          cp "build-pr/share/himbaechel/xilinx/chipdb-${{ matrix.die }}.bin" \
+          # build produces chipdb-<die>.bin.  Copy under the expected name.
+          cp "build/share/himbaechel/xilinx/chipdb-${{ matrix.die }}.bin" \
              "$GITHUB_WORKSPACE/chipdb/$(echo '${{ matrix.part }}' | sed 's/-[0-9]L\?$//').bin"
           export PATH="$GITHUB_WORKSPACE/bin:$PATH"
           export PRJXRAY_DB_DIR="$GITHUB_WORKSPACE/prjxray-db"
@@ -204,34 +507,144 @@ jobs:
           command -v nextpnr-xilinx
           case "$(command -v nextpnr-xilinx)" in
             "$GITHUB_WORKSPACE/bin/"*) ;;
-            *) echo "::error::demos gate is not using this PR's nextpnr-himbaechel"; exit 1 ;;
+            *) echo "::error::gate is not using this PR's nextpnr-himbaechel"; exit 1 ;;
           esac
-          # committed JSONs are reused (no yosys in the gate); a fixed seed
-          # keeps the P&R -- and therefore the golden -- reproducible
           make -C "demo-projects/${{ matrix.project }}" "${{ matrix.top }}.frames" \
                PNR_ARGS="--seed $SEED"
           make -C "demo-projects/${{ matrix.project }}" all PNR_ARGS="--seed $SEED"
+          cp "demo-projects/${{ matrix.project }}/${{ matrix.top }}.fasm" "${{ matrix.name }}.fasm"
+          cp "demo-projects/${{ matrix.project }}/${{ matrix.top }}.frames" "${{ matrix.name }}.frames"
 
-      - name: Verify golden frames
+      # ---------------- source: litex-linux (stretch) ----------------
+
+      # ---------------- source: netlist (stretch) ----------------
+
+      - name: Place and route (netlist)
+        if: matrix.source == 'netlist'
+        env:
+          EX: nextpnr/himbaechel/uarch/xilinx/examples/${{ matrix.design }}
         run: |
-          hash=$(sha256sum "demo-projects/${{ matrix.project }}/${{ matrix.top }}.frames" | cut -d' ' -f1)
-          golden=$(cat "nextpnr/.github/goldens/${{ matrix.project }}.sha256")
+          set -o pipefail
+          gunzip -c "$EX/${{ matrix.netlist }}" > "${{ matrix.name }}.json"
+
+          # A netlist whose memories are uninitialised routes and configures
+          # indistinguishably from a good one and then does nothing on
+          # hardware, so check before spending an hour placing it.
+          python - "${{ matrix.name }}.json" <<'EOF'
+          import json, re, sys
+          d = json.load(open(sys.argv[1]))
+          hexre = re.compile(r'^[0-9a-fA-F]+$')
+          real = 0
+          for m in d["modules"].values():
+              for c in m.get("cells", {}).values():
+                  for k, v in c.get("parameters", {}).items():
+                      if re.match(r'^INIT(_[0-9A-F]{2})?$', k) and isinstance(v, str):
+                          t = v.replace(" ", "")
+                          if hexre.match(t) and set(t) != {"0"}:
+                              real += 1
+          print("INIT words with real content:", real)
+          if real == 0:
+              sys.exit("::error::netlist carries no initialised memory; its "
+                       "ROM is empty and the SoC would boot into nothing")
+          EOF
+
+          # --timing-allow-fail: what this tier answers is whether P&R
+          # completes and yields assemblable FASM, not what Fmax it reaches.
+          # The number is printed so a regression is visible, not gated on.
+          ./build/nextpnr-himbaechel \
+            --device ${{ matrix.part }} \
+            -o xdc="$EX/${{ matrix.xdc }}" \
+            --json "${{ matrix.name }}.json" \
+            -o fasm="${{ matrix.name }}.fasm" \
+            --router router2 --timing-allow-fail 2>&1 | tee pnr.log
+          grep -E "Max frequency|Device utilisation" -A12 pnr.log | tail -25 || true
+
+      # ---------------- common: assemble ----------------
+
+      # An entry may produce FASM the database cannot assemble.  Those are
+      # recorded rather than hidden: the job passes while the failure is
+      # EXACTLY the recorded one, and fails if it changes -- including if it
+      # disappears, which means the defect is fixed and the entry is ready
+      # for a real golden.
+      - name: FASM to frames to bitstream
+        if: matrix.source != 'demo-project' && env.PNR_KNOWN_FAILURE != '1'
+        env:
+          PYTHONPATH: ${{ github.workspace }}/prjxray
+        run: |
+          set -o pipefail   # see the note in the place-and-route step
+          known="nextpnr/.github/references/${{ matrix.name }}.fasm2frames-known-failure"
+          if python prjxray/utils/fasm2frames.py \
+               --part ${{ matrix.part }} \
+               --db-root prjxray-db/${{ matrix.family }} \
+               "${{ matrix.name }}.fasm" "${{ matrix.name }}.frames" 2>&1 | tee f2f.log; then
+            if [ -f "$known" ]; then
+              echo "::error::fasm2frames now succeeds for ${{ matrix.name }}, but a known"
+              echo "failure is still recorded in $known.  If the defect is fixed, delete"
+              echo "that file and add .github/goldens/${{ matrix.name }}.sha256 instead."
+              exit 1
+            fi
+          else
+            if [ -f "$known" ] && grep -qFf "$known" f2f.log; then
+              echo "known defect reproduced: $(cat "$known")"
+              echo "KNOWN_FAILURE=1" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            echo "::error::fasm2frames failed for ${{ matrix.name }}"
+            tail -20 f2f.log
+            exit 1
+          fi
+          ./prjxray/build-prjxray/tools/xc7frames2bit \
+            --part_file "prjxray-db/${{ matrix.family }}/${{ matrix.part }}/part.yaml" \
+            --part_name ${{ matrix.part }} \
+            --frm_file "${{ matrix.name }}.frames" \
+            --output_file "${{ matrix.name }}.bit"
+
+      # ---------------- common: verify ----------------
+
+      # Stretch entries have no golden: they are large enough that their
+      # placement is not worth freezing, and the point of running them is
+      # that they complete at all.
+      - name: Verify golden frames
+        if: matrix.tier == 'essential' && env.KNOWN_FAILURE != '1' && env.PNR_KNOWN_FAILURE != '1'
+        run: |
+          hash=$(sha256sum "${{ matrix.name }}.frames" | cut -d' ' -f1)
+          gf="nextpnr/.github/goldens/${{ matrix.name }}.sha256"
+          # A new entry has no golden until someone records one.  Say so
+          # explicitly instead of failing on a missing file: the hash below
+          # is the value to commit, and it is only trustworthy because this
+          # job pins the database, the prjxray revision and Eigen.
+          if [ ! -f "$gf" ]; then
+            echo "::error::no golden recorded for ${{ matrix.name }}"
+            echo "This entry placed and routed and its FASM assembled, but"
+            echo "nothing is pinned yet.  To adopt this run as the golden:"
+            echo "  echo $hash > .github/goldens/${{ matrix.name }}.sha256"
+            exit 1
+          fi
+          golden=$(cat "$gf")
           if [ "$hash" != "$golden" ]; then
             echo "::error::frames hash mismatch: got $hash, golden $golden"
             echo "If this change intentionally alters FASM output, re-golden:"
-            echo "  sha256sum demo-projects/${{ matrix.project }}/${{ matrix.top }}.frames \\"
-            echo "      | cut -d' ' -f1 > nextpnr/.github/goldens/${{ matrix.project }}.sha256"
+            echo "  sha256sum ${{ matrix.name }}.frames | cut -d' ' -f1 \\"
+            echo "      > nextpnr/.github/goldens/${{ matrix.name }}.sha256"
+            echo "and say in the commit message which features moved and why."
             exit 1
           fi
           echo "golden match: $hash"
 
-      # Built bitstreams are the primary debugging output of this gate.
-      # Kept on failure too -- a broken bitstream is usually what the
-      # failing PR is about.
-      - name: Upload bitstreams
+      # Runs even when the hash gate failed: when the frames move, the first
+      # thing worth knowing is whether the HP-bank feature set moved with
+      # them.  Only vc707-johnson has an external reference to compare
+      # against -- the same design built by the legacy nextpnr-xilinx flow.
+      - name: HP-bank parity against the legacy flow
+        if: always() && matrix.name == 'vc707-johnson' && env.PNR_KNOWN_FAILURE != '1'
+        run: nextpnr/.github/scripts/check-vc707-iob-parity.sh "${{ matrix.name }}.fasm"
+
+      - name: Upload outputs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: bitstreams-${{ matrix.project }}
-          path: demo-projects/${{ matrix.project }}/*.bit
+          name: ${{ matrix.name }}
+          path: |
+            ${{ matrix.name }}.fasm
+            ${{ matrix.name }}.bit
           if-no-files-found: warn

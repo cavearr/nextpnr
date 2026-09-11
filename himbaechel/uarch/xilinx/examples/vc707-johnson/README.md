@@ -16,9 +16,18 @@ artix7, spartan7 and kintex7, and only the kintex7 one has HP banks at all.
 
 ## Building it
 
-The gate (`.github/workflows/virtex7.yml`) runs no yosys -- `top.json` is the
-committed synthesis output, so the golden cannot drift with a runner's yosys
-package.  To rebuild the netlist from source:
+The gate (`.github/workflows/demos.yml`) synthesises this design with the
+runner's yosys and then places and routes it:
+
+    yosys -p 'read_verilog -lib +/xilinx/cells_sim.v; \
+              read_verilog top.v counter25_core.v; \
+              synth_xilinx -top top; write_json vc707-johnson.json'
+
+Note that the runner's yosys is installed from apt and is therefore **not
+pinned**, while the frames below are goldened.  A yosys package bump in the
+runner image can move this golden without any nextpnr change.  Committing the
+stripped netlist instead would decouple the two -- which is what the strip
+step below is for:
 
     yosys -p 'synth_xilinx -flatten -abc9 -nobram -arch xc7 -top top; \
               write_json top.full.json' top.v counter25_core.v
