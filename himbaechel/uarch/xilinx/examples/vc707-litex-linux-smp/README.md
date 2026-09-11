@@ -48,6 +48,22 @@ rv64 payload served to an rv32 core resets on an illegal instruction, and a
 payload whose device tree describes another SoC's CSR map hangs with no
 output at all.  See `mac_for_cpu()` in the generator.
 
+## The BIOS in this netlist
+
+The netlist carries the SoC's BIOS in its ROM, so which BIOS matters.  This
+one has bounded waits in `sdcard_wait_cmd_done()` and
+`sdcard_wait_data_done()`.  Without them the BIOS hangs outright on this
+board: those loops wait on the SD core's "done" bit, the only timeout
+available is the core's own timeout bit, and a core seeing no bus activity
+sets neither -- which is exactly what the open flow's four missing IN_DIFF
+input-buffer bits produce.  Since sdcard boot runs at priority 30 and network
+boot at 50, the hang comes twenty levels before the board would have
+netbooted, and the only way past it is to interrupt the BIOS by hand.
+
+With the waits bounded, a dead SD interface costs one timeout and the boot
+continues.  Nothing in CI boots this design, but a netlist whose BIOS hangs
+is a poor regression baseline, and the difference is invisible in the FASM.
+
 ## A caveat if you build a bitstream from this
 
 This netlist was regenerated so that its MAC would be the SMP one, and the
