@@ -102,6 +102,29 @@ env:
   # the same tile on both sides of the comparison at once.  Pin it for the
   # whole workflow rather than per script.
   LC_ALL: C
+  # The placer settings the flow that produces WORKING HARDWARE uses.  Both
+  # halves were established on the VC707 by flashing, not by reading reports.
+  #
+  # Eigen is the HeAP placer's linear solver, so its version IS a placer
+  # setting.  5.0.1 and 3.4.0 diverge from the first solve of this SoC --
+  # "wirelen solved" 61897 against 61907, and the spread from there -- and on
+  # the VexRiscv-SMP Linux netlist the 5.0.1 placement comes out with dead
+  # ethernet: the BIOS reaches netboot and reports "ARP failed", on three
+  # separate CI builds.  Rebuilding that same netlist, same nextpnr commit,
+  # same flags, against 3.4.0 reproduces the known-good bitstream EXACTLY --
+  # 471754 features, zero differences, identical in original order -- and that
+  # bitstream ARPs.  Nothing else distinguished them.
+  #
+  # 5.0.1 was pinned in 15cadd5c "for golden reproducibility".  The frames
+  # hash it was protecting is a warning now, not a gate, so that reason is
+  # gone; what the pin still did was ship gateware whose network is dead.
+  #
+  # --placer-heap-timingweight 60 is NEXTPNR_FLAGS in xc7-bitstream-tools'
+  # Makefile, on every nextpnr invocation there.  On this SoC it moves
+  # eth_tx_clk from 126.84 MHz -- a 1.5% margin over the 125 MHz it must make,
+  # which is inside the noise of the timing model -- to 218.48 MHz.  A design
+  # that only just passes is a design whose next placement may not.
+  PNR_PLACER_FLAGS: --placer-heap-timingweight 60
   # Pinned to make the gate reproducible: the chipdb is generated from
   # prjxray-db and the frames from prjxray's fasm2frames, so a moving
   # database or tool revision would change what is measured.
@@ -472,15 +495,18 @@ jobs:
       # Eigen is header-only; build it from a fixed gitlab tag.  placer_heap
       # solves a sparse system with Eigen's iterative solver whose numerics
       # differ between major versions, so which Eigen built a run decides the
-      # placement it produces.  That no longer decides a verdict -- a proof is
-      # taken against whatever placement resulted -- but it still decides
-      # whether two runs are comparable while one is being debugged, which is
-      # worth a pinned dependency.  nextpnr uses find_package(Eigen3
-      # NO_MODULE), so CMAKE_PREFIX_PATH below makes this win over the system
-      # one.
-      - name: Install Eigen 5.0.1 (pinned so runs are comparable)
+      # placement it produces -- and therefore whether the gateware works.
+      # 3.4.0 is not a conservative default here, it is the version proved on
+      # hardware; see PNR_PLACER_FLAGS at the top of this file for the
+      # measurements.  nextpnr uses find_package(Eigen3 NO_MODULE), so
+      # CMAKE_PREFIX_PATH below makes this win over the system one.
+      #
+      # If this is ever moved again, move it because a BOARD was flashed, not
+      # because a report looked better: the 5.0.1 placement passed every
+      # timing check nextpnr makes and its ethernet was dead.
+      - name: Install Eigen 3.4.0 (the version proved on hardware)
         run: |
-          git clone --depth 1 --branch 5.0.1 https://gitlab.com/libeigen/eigen.git /tmp/eigen
+          git clone --depth 1 --branch 3.4.0 https://gitlab.com/libeigen/eigen.git /tmp/eigen
           cmake -S /tmp/eigen -B /tmp/eigen-build \
             -DCMAKE_INSTALL_PREFIX=/tmp/eigen-install \
             -DBUILD_TESTING=OFF -DEIGEN_BUILD_BLAS=OFF -DEIGEN_BUILD_LAPACK=OFF
@@ -591,7 +617,7 @@ jobs:
                --json "${{ matrix.name }}.json" \
                -o fasm="${{ matrix.name }}.fasm" \
                ${{ matrix.lvs && format('-o placement={0}_placement.json', matrix.name) || '' }} \
-               --router router2 2>&1 | tee pnr.log; then
+               --router router2 $PNR_PLACER_FLAGS 2>&1 | tee pnr.log; then
             if [ -f "$known" ]; then
               echo "::error::${{ matrix.name }} now places and routes, but a known"
               echo "P&R failure is still recorded in $known.  If the defect is"
@@ -653,7 +679,7 @@ jobs:
           set -o pipefail
           known="nextpnr/.github/references/${{ matrix.name }}.pnr-known-failure"
           if make -C "demo-projects/${{ matrix.project }}" all \
-                  PNR_ARGS="--seed $SEED $PLACEMENT" 2>&1 | tee build.log; then
+                  PNR_ARGS="--seed $SEED $PLACEMENT $PNR_PLACER_FLAGS" 2>&1 | tee build.log; then
             if [ -f "$known" ]; then
               echo "::error::${{ matrix.name }} now builds, but a known P&R"
               echo "failure is still recorded in $known.  If the defect is"
@@ -714,7 +740,7 @@ jobs:
             -o xdc="$EX/${{ matrix.xdc }}" \
             --json "${{ matrix.name }}.json" \
             -o fasm="${{ matrix.name }}.fasm" \
-            --router router2 --timing-allow-fail 2>&1 | tee pnr.log
+            --router router2 --timing-allow-fail $PNR_PLACER_FLAGS 2>&1 | tee pnr.log
           grep -E "Max frequency|Device utilisation" -A12 pnr.log | tail -25 || true
 
       # ---------------- common: assemble ----------------
