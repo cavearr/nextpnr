@@ -529,6 +529,11 @@ void XilinxImpl::prePlace()
     assign_cell_tags();
     index_control_sets();
     cell_tags_set = true;
+    for (auto &cell : ctx->cells) {
+        CellInfo *ci = cell.second.get();
+        if (ci->bel != BelId())
+            notifyBelChange(ci->bel, ci);
+    }
 }
 
 void XilinxImpl::postPlace()
