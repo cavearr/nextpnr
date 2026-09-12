@@ -397,7 +397,7 @@ void XC7Packer::pack_io()
             for (auto &usr : net->users) {
                 if (usr.cell->type.in(id_GTPE2_COMMON, id_GTXE2_COMMON))
                     gt_common = usr.cell;
-                else if (usr.cell->type == id_GTXE2_CHANNEL)
+else if (usr.cell->type.in(id_GTPE2_CHANNEL, id_GTXE2_CHANNEL))
                     has_gtxe2_channel_direct = true;
                 else if (usr.cell->type.in(id_BUFG, id_BUFH, id_BUFHCE, id_BUFR))
                     has_bufg_direct = true;
