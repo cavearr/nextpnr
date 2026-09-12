@@ -1187,16 +1187,28 @@ void XC7Packer::pack_cfg()
 }
 
 
-SiteIndex XC7Packer::get_gt_site(BelId pad_bel)
+SiteIndex XC7Packer::get_gt_site(BelId pad_bel, IdString want)
 {
     int tile = pad_bel.tile;
     const auto &sites = uarch->tile_extra_data(tile)->sites;
     for (int32_t i = 0; i < int32_t(sites.ssize()); i++) {
-        std::string name = IdString(sites[i].name_prefix).str(ctx);
-        if (boost::starts_with(name, "GTPE2_") || boost::starts_with(name, "GTXE2_"))
-            return SiteIndex(tile, i);
+        // A GT tile holds a COMMON site and a CHANNEL site, and both are
+        // named GTxE2_something.  Match the site's KIND to the cell's type --
+        // a GTXE2_CHANNEL belongs in a GTXE2_CHANNEL site -- rather than
+        // taking the first GT-prefixed site and hoping.  That was harmless
+        // while only a COMMON was ever placed this way; once a CHANNEL is
+        // placed too, first-match is the wrong site.  The site name and the
+        // cell type are the same spelling, which is what makes this exact
+        // rather than a heuristic, and it does not depend on the order the
+        // sites happen to be in.
+        if (IdString(sites[i].name_prefix) != want)
+            continue;
+        return SiteIndex(tile, i);
     }
-    NPNR_ASSERT_FALSE("failed to find GTP/GTX site for pad");
+    // Not an error: a COMMON shares the reference clock pad's tile, but a
+    // CHANNEL taking that clock directly (CPLL mode) sits in a tile of its
+    // own, located by its own data pads.  The caller leaves it to the placer.
+    return SiteIndex();
 }
 
 void XC7Packer::constrain_ibufds_gt_site(CellInfo *buf_cell, BelId pad_bel)
@@ -1292,7 +1304,16 @@ void XC7Packer::constrain_gt(CellInfo *pad_cell, CellInfo *gt_cell)
                       pad_cell->name.c_str(ctx), pad_bel.tile, gt_cell->name.c_str(ctx), gt_cell->bel.tile);
         return;
     }
-    SiteIndex gt_site = get_gt_site(pad_bel);
+    SiteIndex gt_site = get_gt_site(pad_bel, gt_cell->type);
+    if (gt_site == SiteIndex()) {
+        // The reference clock reaches a transceiver that is not in this pad's
+        // tile.  Pinning it here would be wrong even if a site existed; say so
+        // and let the placer put it where its own pads require.
+        log_info("    '%s' takes its reference clock from pad '%s' but sits in another tile; "
+                 "leaving it to the placer\n",
+                 gt_cell->name.c_str(ctx), pad_cell->name.c_str(ctx));
+        return;
+    }
     BelId gt_bel = uarch->get_site_bel(gt_site, gt_cell->type);
     NPNR_ASSERT(gt_bel != BelId());
     ctx->bindBel(gt_bel, gt_cell, STRENGTH_LOCKED);
