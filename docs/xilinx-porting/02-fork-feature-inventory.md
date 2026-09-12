@@ -230,8 +230,8 @@ Major features:
 ## 4. Constraints (`xilinx/xdc.cc`, 309 lines)
 
 Parsed (not ignored):
-- **`set_property`** on `get_ports`/`get_nets` (only these selectors; `get_cells`
-  unsupported for set_property → warning @112). Stores raw attr on the cell:
+- **`set_property`** on `get_ports` and exact `get_cells` targets (`-hier` accepted;
+  unsupported selector options rejected). Stores raw attr on the cell:
   `PACKAGE_PIN`, `IOSTANDARD`, `DRIVE`, `SLEW`, `PULLTYPE` (PULLUP/PULLDOWN/KEEPER/
   NONE), `LOC`/`BEL`, `IN_TERM`, and any other property verbatim. Semantics are
   applied later in `pins.cc` + `fasm.cc` (IOSTANDARD/DRIVE/SLEW/PULLTYPE) and
@@ -242,7 +242,8 @@ Parsed (not ignored):
   warning + skip (@227–231). Miss target → warning + default period kept (@234–238).
 - **`set_multicycle_path`** (@245): `-setup` only; `-to [get_cells -hier -filter
   {NAME =~ *glob*}]` NAME-glob matched (`*`/`?`), tags matching cells with
-  `NEXTPNR_MCP_SETUP` attr; `-hold` parsed but no-op (@294). Honoured in
+  `NEXTPNR_MCP_SETUP` attr; `-hold` parsed but no-op (@294); `-from` selectors are
+  rejected as unsupported. Honoured in
   `common/timing.cc` (walk_paths @390–393, @567–569, @909).
 
 Parsed-then-ignored / unsupported (logged):

@@ -152,6 +152,9 @@ void XC7Packer::bypass_pll_input_buffers()
             if (!pads.count(src->driver.cell->type))
                 continue;
 
+            if (buf->attrs.count(id_LOC) || buf->attrs.count(id_BEL) || buf->bel != BelId())
+                continue;
+
             ci->disconnectPort(port);
             ci->connectPort(port, src);
             ++bypassed;

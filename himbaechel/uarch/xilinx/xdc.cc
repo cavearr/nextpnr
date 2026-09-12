@@ -117,9 +117,35 @@ void XilinxImpl::parse_xdc(const std::string &filename)
             log_error("targets other than 'get_ports' or 'get_cells' are not supported (on line %d)\n", lineno);
         if (split.size() < 2)
             log_error("failed to parse target (on line %d)\n", lineno);
-        IdString cellname = ctx->id(strip_quotes(split.at(1)));
+        std::string target_name;
+        if (split.front() == "get_cells") {
+            int cursor = 1;
+            while (cursor < int(split.size()) && !split.at(cursor).empty() && split.at(cursor).at(0) == '-') {
+                if (split.at(cursor) == "-hier") {
+                    ++cursor;
+                    continue;
+                }
+                log_nonfatal_error("unsupported get_cells option '%s' (on line %d)\n", split.at(cursor).c_str(), lineno);
+                num_errors++;
+                return tgt_cells;
+            }
+            if (cursor >= int(split.size())) {
+                log_nonfatal_error("failed to parse get_cells target (on line %d)\n", lineno);
+                num_errors++;
+                return tgt_cells;
+            }
+            if ((cursor + 1) != int(split.size())) {
+                log_nonfatal_error("unsupported get_cells selector form '%s' (on line %d)\n", str.c_str(), lineno);
+                num_errors++;
+                return tgt_cells;
+            }
+            target_name = strip_quotes(split.at(cursor));
+        } else {
+            target_name = strip_quotes(split.at(1));
+        }
+        IdString cellname = ctx->id(target_name);
         if (!ctx->cells.count(cellname)) {
-            std::string base = debus_zero(strip_quotes(split.at(1)));
+            std::string base = debus_zero(target_name);
             if (!base.empty() && ctx->cells.count(ctx->id(base)))
                 cellname = ctx->id(base);
         }
@@ -336,7 +362,11 @@ void XilinxImpl::parse_xdc(const std::string &filename)
                 if (a == "-hold")
                     is_hold = true;
                 else if (a == "-to" && c + 1 < int(arguments.size()))
-                    to_sel = arguments.at(c + 1);
+                    to_sel = arguments.at(++c);
+                else if (a == "-from") {
+                    log_warning("ignoring unsupported XDC option '-from' in set_multicycle_path (on line %d)\n", lineno);
+                    goto nextline;
+                }
                 else if (!a.empty() && std::all_of(a.begin(), a.end(), ::isdigit))
                     mcp = std::stoi(a);
             }

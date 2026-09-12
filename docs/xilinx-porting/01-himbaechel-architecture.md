@@ -193,18 +193,21 @@ Line counts are `wc -l` on the checkout.
 `XilinxImpl::parse_xdc` (invoked from `pack()` when `--xdc` is given, `pack.cc:824-826`)
 is a line-based, regex/`boost::split` parser supporting a narrow subset:
 
-- **`set_property`** on `[get_ports …]` targets only (`xdc.cc:92-108`): properties are
-  stored as cell attributes. Supports `-dict` and single property pairs; `[current_design]`
-  and `INTERNAL_VREF` are warned-and-ignored. This is how `PACKAGE_PIN`/`LOC`,
-  `IOSTANDARD`, `DRIVE`, `SLEW`, `PULLTYPE`, `IN_TERM` etc. reach the flow. `LOC` is aliased
-  from `PACKAGE_PIN` (`pack_io.cc:341-343`).
+- **`set_property`** on `[get_ports …]` and exact `[get_cells …]` targets
+  (`xdc.cc:92-108`): properties are stored as cell attributes. Supports `-dict` and
+  single property pairs; `[current_design]` and `INTERNAL_VREF` are warned-and-ignored.
+  This is how `PACKAGE_PIN`/`LOC`, `IOSTANDARD`, `DRIVE`, `SLEW`, `PULLTYPE`, `IN_TERM`
+  etc. reach the flow. `LOC` is aliased from `PACKAGE_PIN` (`pack_io.cc:341-343`).
 - **`create_clock`** with `-period` (ns) on `[get_ports]`/`[get_nets]`
   (`xdc.cc:208-254`): sets `NetInfo::clkconstr` (period + 50% duty). `-name`, `-waveform`,
   `-add` are warned-and-ignored.
-- **Not supported**: `set_multicycle_path`, `set_false_path`, `set_max_delay`/`set_min_delay`,
-  `create_generated_clock`, `set_input_delay`/`set_output_delay`, path groups, `get_cells`/
-  `get_pins`/`get_iobanks`/`get_clocks` targets, and any constraint other than the two above
-  (default: `log_warning("ignoring unsupported XDC command …")`, `xdc.cc:256`).
+- **`set_multicycle_path`** supports setup multicycle tagging with `-to [get_cells ...]`
+  NAME-glob selectors; `-hold` is parsed but does not set setup tags, and `-from` is
+  rejected as unsupported (`xdc.cc`).
+- **Not supported**: `set_false_path`, `set_max_delay`/`set_min_delay`,
+  `create_generated_clock`, `set_input_delay`/`set_output_delay`, path groups,
+  `get_pins`/`get_iobanks`/`get_clocks` targets, and any constraint other than the
+  three above (default: `log_warning("ignoring unsupported XDC command …")`, `xdc.cc:256`).
 
 ---
 

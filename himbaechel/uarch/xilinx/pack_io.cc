@@ -416,6 +416,12 @@ else if (usr.cell->type.in(id_GTPE2_CHANNEL, id_GTXE2_CHANNEL))
                 constrain_gt(pad_cell, gt_common);
                 continue;
             }
+            if (has_gtxe2_channel_direct) {
+                for (auto &usr : net->users) {
+                    if (usr.cell->type.in(id_GTPE2_CHANNEL, id_GTXE2_CHANNEL))
+                        constrain_gt(pad_cell, usr.cell);
+                }
+            }
             if (has_gtxe2_channel_direct || has_bufg_direct) {
                 continue;
             }
