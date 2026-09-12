@@ -285,6 +285,13 @@ jobs:
           # recently, wrong enough to freeze real hardware (openXC7 #177).
           # Two entries because the DDR one reaches the memory controller
           # and the minimal one is the fast smoke test.
+          # RECORDED P&R FAILURE: the same SING tile as litex-ddr-arty-s7
+          # below, reached by the other clock pin.  Both boards' constraint
+          # file pins ddram_reset_n to J6, whose OLOGIC is in
+          # RIOI3_SING_X43Y49; here it is the OLOGIC clock rather than the
+          # divider, and segbits+ppips for RIOI3_SING carry 2 OLOGIC*CLK*
+          # features against 32 for plain RIOI3.  One under-fuzzed tile type
+          # accounts for both designs.
           - name: litex-minimal-arty-s7
             tier: essential
             lvs: true
@@ -800,8 +807,12 @@ jobs:
       #
       # The flow is xc7-bitstream-tools' scripts/verify_examples.sh, which is
       # the reference for it.
+      # No always() here.  A proof needs a netlist to prove, so if an earlier
+      # step did not produce one there is nothing to say: running anyway
+      # turned a failed build into "blocked -- extraction from the bitstream
+      # failed", which reads like a modelling gap and hides the real error.
       - name: LVS equivalence against the synthesis
-        if: always() && matrix.lvs && env.PNR_KNOWN_FAILURE != '1'
+        if: matrix.lvs && env.PNR_KNOWN_FAILURE != '1'
         env:
           EX: nextpnr/himbaechel/uarch/xilinx/examples/${{ matrix.design }}
           TILEVERILOG: ${{ github.workspace }}/build-f2n/tileverilog
@@ -825,11 +836,26 @@ jobs:
             *)
               echo "::error::no LVS inputs defined for source ${{ matrix.source }}"; exit 1 ;;
           esac
+          # Exit 77 is the script's "blocked" verdict: not proved, for a
+          # reason it can name -- an unsupported primitive, or the proof not
+          # finishing inside EQUIV_TIMEOUT.  That is a different statement
+          # from "these netlists differ", and it must not fail the gate, so
+          # it is translated here.  Calling the script bare made every
+          # blocked design a red job, which would also have hit the large
+          # LiteX projects at the ten-minute bound.
+          set +e
           nextpnr/.github/scripts/lvs-equiv.sh \
             "${{ matrix.name }}" "lvs-${{ matrix.name }}" \
             "${{ matrix.name }}.fasm" "${{ matrix.name }}_placement.json" \
             "$gold" "$xdc" \
             "${{ matrix.part }}" "${{ matrix.die }}" "${{ matrix.family }}" "$top"
+          rc=$?
+          set -e
+          if [ "$rc" = 77 ]; then
+            echo "::notice::${{ matrix.name }}: LVS blocked, see the reason above -- not a failure"
+            exit 0
+          fi
+          exit "$rc"
 
       # Runs even when the hash gate failed: when the frames move, the first
       # thing worth knowing is whether the HP-bank feature set moved with

@@ -34,6 +34,35 @@ part=$7; device=$8; family=$9; top=${10}
 
 log="$d/lvs.log"; mkdir -p "$d"; : > "$log"
 
+# Check the inputs BEFORE running anything, and fail loudly if one is absent.
+# A missing input is not a blocked proof: "blocked" means the flow was asked a
+# question it cannot answer yet, and reports exit 77 so the gate stays green.
+# A file that was never produced means the design did not build, and nothing
+# was compared at all -- reporting that as blocked hides a broken build behind
+# a green tick.  tileverilog aborts on a missing --fasm with a C++ exception
+# ("cannot open <file>"), which the extraction branch below would have
+# classified as an unsupported primitive.
+for f in "$fasm" "$placement" "$goldjson" "$xdc"; do
+    if [ ! -s "$f" ]; then
+        echo "::error::$name: LVS input missing or empty: $f"
+        echo "Nothing was compared.  This is not a blocked proof -- the step"
+        echo "that should have produced this file did not, so look there first."
+        exit 1
+    fi
+done
+
+# Same again for the database side.  tileverilog reads the tilegrid for the
+# DIE, and prjxray does not model every part number separately: the Arty's
+# xc7a35t is the xc7a50t die, and artix7/xc7a35t/ simply does not exist.
+# Passing a part where a die belongs aborts tileverilog with "cannot open
+# .../tilegrid.json", which the extraction branch would again have called a
+# blocked proof.
+if [ ! -s "$PRJXRAY_DB/$family/$device/tilegrid.json" ]; then
+    echo "::error::$name: no tilegrid for device '''$device''' under $PRJXRAY_DB/$family"
+    echo "This wants the die prjxray models (xc7a50t), not the part (xc7a35tcsg324-1)."
+    exit 1
+fi
+
 # Extraction: the bitstream back to a fabric netlist.  A primitive the tile
 # model does not cover stops it here, which is a blocker rather than a
 # difference -- nothing has been compared yet.
