@@ -91,6 +91,17 @@ permissions:
   contents: read
 
 env:
+  # Every comparison this gate makes is between sorted text -- IOB feature
+  # sets, FASM lines, delta files -- and feature names mix '.' and '_' as
+  # separators.  Those two characters collate in OPPOSITE orders under C
+  # (where '.' 0x2E precedes '_' 0x5F) and under an en_*.UTF-8 collation,
+  # so an unpinned locale makes a recorded reference mean one thing on the
+  # machine that recorded it and another on the runner that checks it: the
+  # VC707 IOB delta recorded under en_GB.UTF-8 reported adjacent lines as
+  # moved, and diff misaligned the surrounding hunks badly enough to show
+  # the same tile on both sides of the comparison at once.  Pin it for the
+  # whole workflow rather than per script.
+  LC_ALL: C
   # Pinned to make the gate reproducible: the chipdb is generated from
   # prjxray-db and the frames from prjxray's fasm2frames, so a moving
   # database or tool revision would change what is measured.
@@ -287,6 +298,30 @@ jobs:
             seed: 1
             timeout: 120
 
+          # RECORDED P&R FAILURE: an OSERDESE2 that cannot be configured.
+          #
+          # LiteX drives every DDR output through an OSERDESE2 with CLKDIV
+          # connected (45 of them here), and ddram_reset_n is pinned to J6 --
+          # IOB_X1Y49, whose OLOGIC sits in RIOI3_SING_X43Y49.  prjxray's
+          # spartan7 SING databases define NO OLOGIC CLKDIV feature at all:
+          # segbits+ppips for RIOI3_SING carry 71 features against 531 for
+          # plain RIOI3, which has all 24 OLOGIC*CLKDIV routes including the
+          # IOI_OLOGIC0_CLKDIV <- IOI_IMUX8_* one wanted here.  So the clock
+          # cannot reach that divider in a SING tile, and a LOC pins the cell
+          # there -- the placer has no say.
+          #
+          # This is not new breakage.  The chipdb generator now flags every
+          # tile-routing pip absent from both bit databases (PIP_CFG_NO_BITS)
+          # and XilinxImpl::is_pip_unavail refuses it, so the router says so
+          # out loud.  Before that the pip was routed, the feature was written,
+          # fasm2frames dropped it under XRAY_ALLOW_MISSING_FEATURES, and the
+          # board got a bitstream whose DDR PHY divider clock was simply
+          # absent.  The golden frames hash recorded for this design came from
+          # such a build, which is why a recorded hash was never evidence.
+          #
+          # Closing it means fuzzing the SING OLOGIC clock bits in prjxray,
+          # not a change here.  Same under-fuzzed SING tiles as the five
+          # LIOB18_SING features still missing in the VC707 IOB delta.
           - name: litex-ddr-arty-s7
             tier: essential
             lvs: true
@@ -450,7 +485,12 @@ jobs:
       - name: Chipdb cache key
         id: chipdb-key
         run: |
-          h=$(cat nextpnr/himbaechel/uarch/xilinx/gen/xilinx_gen.py \
+          # Hash EVERY generator file, not just the entry point: xilinx_gen.py
+          # imports xilinx_device, filters and parse_sdf, and xilinx_device
+          # imports tileconn.  Keying on xilinx_gen.py alone meant a change to
+          # any of the others restored a .bba built by the old generator, so
+          # the job ran a current binary against a stale chipdb.
+          h=$(cat nextpnr/himbaechel/uarch/xilinx/gen/*.py \
                   nextpnr/himbaechel/uarch/xilinx/constids.inc | sha256sum | cut -c1-16)
           echo "key=${{ matrix.die }}-bba-${{ env.PRJXRAY_DB_REV }}-$h" >> "$GITHUB_OUTPUT"
 
@@ -589,9 +629,40 @@ jobs:
           if [ -n "${{ matrix.lvs }}" ]; then
             PLACEMENT="-o placement=$GITHUB_WORKSPACE/${{ matrix.name }}_placement.json"
           fi
-          make -C "demo-projects/${{ matrix.project }}" "${{ matrix.top }}.frames" \
-               PNR_ARGS="--seed $SEED $PLACEMENT"
-          make -C "demo-projects/${{ matrix.project }}" all PNR_ARGS="--seed $SEED"
+          # ONE invocation, with ONE set of PNR_ARGS.  This step used to run
+          # make twice -- once for .frames carrying the placement dump, then
+          # again for `all` without it -- which was harmless only because the
+          # second run found everything up to date.  Any staleness at all and
+          # P&R re-runs without the dump, leaving the LVS step to compare a
+          # placement file against frames produced by a different run: a
+          # mismatched-artefact comparison whose verdict means nothing.
+          # `all` is ${TOP}.bit, which pulls .frames and .fasm anyway.
+          #
+          # A demo project can also be in the gate BECAUSE it does not build,
+          # on the same terms as the examples above: the failure is recorded,
+          # and the job passes only while it is EXACTLY the recorded one --
+          # including failing if it disappears, which means the defect is
+          # fixed and the design is ready to be gated on again.
+          set -o pipefail
+          known="nextpnr/.github/references/${{ matrix.name }}.pnr-known-failure"
+          if make -C "demo-projects/${{ matrix.project }}" all \
+                  PNR_ARGS="--seed $SEED $PLACEMENT" 2>&1 | tee build.log; then
+            if [ -f "$known" ]; then
+              echo "::error::${{ matrix.name }} now builds, but a known P&R"
+              echo "failure is still recorded in $known.  If the defect is"
+              echo "fixed, delete that file so the design is gated on again."
+              exit 1
+            fi
+          else
+            if [ -f "$known" ] && grep -qFf "$known" build.log; then
+              echo "known P&R defect reproduced: $(grep -m1 -Ff "$known" build.log)"
+              echo "PNR_KNOWN_FAILURE=1" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            echo "::error::build failed for ${{ matrix.name }}"
+            tail -30 build.log
+            exit 1
+          fi
           cp "demo-projects/${{ matrix.project }}/${{ matrix.top }}.fasm" "${{ matrix.name }}.fasm"
           cp "demo-projects/${{ matrix.project }}/${{ matrix.top }}.frames" "${{ matrix.name }}.frames"
 

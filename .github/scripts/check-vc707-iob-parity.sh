@@ -17,6 +17,16 @@
 # Usage: check-vc707-iob-parity.sh <produced.fasm>
 set -euo pipefail
 
+# Feature names mix '.' and '_' as separators, and the two characters collate
+# in the OPPOSITE order under C/C.UTF-8 (where '.' 0x2E precedes '_' 0x5F) and
+# under an en_*.UTF-8 collation (which weighs punctuation differently).  So an
+# unpinned sort makes the recorded delta depend on which machine recorded it:
+# a delta recorded under en_GB.UTF-8 and checked on a C.UTF-8 runner reports
+# adjacent lines as moved, and diff misaligns the surrounding hunks badly
+# enough to show the same tile on both sides of the comparison at once.
+# Pin the collation so the recorded file means the same thing everywhere.
+export LC_ALL=C
+
 record=0
 if [ "${1:-}" = "--record" ]; then
     record=1
@@ -30,8 +40,12 @@ expected="$here/references/vc707-johnson-iob-delta.txt"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
+# Both sides must be ordered by the same rule for diff to pair them up, and
+# the committed legacy list was sorted whenever it was first captured -- so
+# re-sort it here rather than trusting the order it carries.
+sort -u "$legacy" > "$tmp/legacy.txt"
 grep -E '^(L|R)IOB' "$fasm" | sort -u > "$tmp/produced.txt"
-diff "$legacy" "$tmp/produced.txt" | grep '^[<>]' | sort > "$tmp/delta.txt" || true
+diff "$tmp/legacy.txt" "$tmp/produced.txt" | grep '^[<>]' | sort > "$tmp/delta.txt" || true
 
 if [ "$record" = 1 ]; then
     cp "$tmp/delta.txt" "$expected"
