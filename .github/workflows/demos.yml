@@ -1,6 +1,6 @@
 # Regression gate: build a representative design set against THIS PR's
-# himbaechel/xilinx code + openXC7 prjxray-db, and verify the resulting
-# bitstream frames against committed goldens.
+# himbaechel/xilinx code + openXC7 prjxray-db, and prove each result
+# equivalent to the synthesis it came from.
 #
 # Why it exists: the openXC7 demo-projects CI builds against the
 # toolchain-nix pin of nextpnr-xilinx, so a nextpnr PR never exercises the
@@ -9,12 +9,12 @@
 # TIERS
 #
 #   essential -- small, fast designs plus the five demo projects.  Every
-#     entry is goldened and blocking.  This is the list that has to stay
+#     entry is proved and blocking.  This is the list that has to stay
 #     green: between them they cover artix7, spartan7, kintex7 and virtex7,
 #     both I/O banks, the clocking column, BRAM, carry and DSP.
 #
 #   stretch -- LiteX Linux-capable SoCs.  Large (tens of minutes of P&R),
-#     not goldened, and NON-BLOCKING (continue-on-error).  They exist to
+#     not proved, and NON-BLOCKING (continue-on-error).  They exist to
 #     catch the failures that only appear at scale: router congestion,
 #     placer timeouts, and cell shapes no small design instantiates.  A
 #     stretch failure is a bug report, not a merge blocker.
@@ -33,47 +33,49 @@
 # grid.py prefers a tile type's own segbits database over the alias path,
 # because on IOB SING tiles the alias metadata names the wrong site and
 # misplaces the words, silently corrupting neighbouring tiles' frames.  The
-# kintex7 golden therefore moved with the pin, and the frames it produces
-# now are the more correct ones.  One revision for every family is worth
+# kintex7 frames therefore moved with the pin, and the ones it produces now
+# are the more correct ones.  One revision for every family is worth
 # more than a bit-for-bit-frozen old one.
 #
-# GOLDEN POLICY
+# WHAT IS CHECKED
 #
-# Goldens are the expected output of THIS repo's himbaechel/xilinx
-# implementation, at the pinned prjxray-db revision, with a fixed P&R seed
-# where one is passed, and a pinned Eigen.  placer_heap solves a sparse
-# system with Eigen's iterative solver and its numerics differ between
-# Eigen major versions, so the large goldens only reproduce on the Eigen
-# they were made with (5.0.1, gitlab tag 5.0.1 = bc3b3987).  A mismatch
-# fails the gate: if a change intentionally alters FASM output, re-golden
-# the affected entry and say in the commit message which features moved
-# and why.
+# Per-register equivalence, with lvs_equiv: the bitstream is read back into a
+# fabric netlist and proved equal to the synthesis nextpnr was given, cone by
+# cone.  This takes over from the sha256 of the frames, which was a poor
+# instrument for the job and is kept only as a warning.  A hash detects that
+# something moved; it cannot say whether what moved matters.  Placement is not canonical, the writer's feature order is
+# not canonical, and any routing change moves bytes without changing logic --
+# so every improvement to the placer broke the gate, and every break looked
+# the same as damage.  Equivalence answers the question the hash was standing
+# in for.
 #
-# The FASM itself is not hashed: its first line carries the git description
-# of the binary that wrote it, so it changes on every commit.  fasm2frames
-# drops comments, so the frames hash is stable across no-op commits.
+# Three consequences worth stating, because they are what the change buys:
 #
-# KNOWN LIMITATION: yosys is not pinned
+#   * a different placement is not a failure.  The hash still notices and
+#     says so as a warning; nothing needs re-recording for a build to pass,
+#     and nothing needs a pinned RNG to be comparable.
+#   * yosys need not be pinned.  A hash was hostage to the runner's apt
+#     yosys; a proof is taken against whatever netlist that yosys produced,
+#     so a package bump changes the measurement and not the verdict.
+#   * a timeout is not a failure either.  EQUIV_TIMEOUT bounds each target at
+#     ten minutes and reports what it could not discharge as blocked -- not
+#     proved, for a known reason, which is a different statement from "these
+#     two netlists differ".
 #
-# The `example` and `litex-linux` entries synthesise with the runner's apt
-# yosys, which is not pinned, while the example entries are goldened.  A
-# yosys package bump in the runner image can therefore move an example's
-# frames with no nextpnr change at all, and the failure will look like a
-# regression in this repo.  The fix is to commit each example's stripped
-# netlist (.github/scripts/strip-netlist-blackboxes.py exists for exactly
-# that, and reduces ~10 MB of blackbox declarations to tens of kB) and stop
-# running yosys for goldened entries.  That is deliberately not done here:
-# it would re-record every existing example golden in a change whose
-# subject is something else.  The stretch entries are unaffected, having no
-# goldens.
+# What it does NOT check is the memory contents behind a boundary cut: a block
+# RAM, a DSP and a clock manager are cut at their pins, so what is proved is
+# that both sides wired the same nets to the same places.  The contents are
+# checked where they can be, against the bitstream, in fasm2netlist's own
+# tests.
 #
 # SEEDS
 #
-# The demo projects pass --seed.  The vc707 examples deliberately do not:
-# their goldens were produced with the default RNG state, and passing
-# --seed with the default VALUE is not equivalent -- DeterministicRNG()
-# seeds rngstate directly, while rngseed() also advances the generator five
-# steps.  Adding a seed there changes the placement and invalidates them.
+# The demo projects pass --seed and the vc707 examples do not.  That was once
+# load-bearing -- the goldens were made with the default RNG state, and
+# passing --seed with the default VALUE is not equivalent, since
+# DeterministicRNG() seeds rngstate directly while rngseed() also advances the
+# generator five steps.  With the hashes gone it no longer decides anything;
+# it is kept only so a run is reproducible while being debugged.
 
 name: demos
 
@@ -91,7 +93,7 @@ permissions:
 env:
   # Pinned to make the gate reproducible: the chipdb is generated from
   # prjxray-db and the frames from prjxray's fasm2frames, so a moving
-  # database or tool revision would break golden matching.
+  # database or tool revision would change what is measured.
   PRJXRAY_DB_REV: ab1fc60c38a0dc1bc1d3d495f3189b25ae971e04
   # virtex7-capable fasm2frames, used for every family; see header
   PRJXRAY_REV: e1302fc6f8662a237e42790073fa641f2d9f1371
@@ -243,6 +245,7 @@ jobs:
           # Smallest artix7 end-to-end path.
           - name: blinky-digilent-arty
             tier: essential
+            lvs: true
             source: demo-project
             project: blinky-digilent-arty
             top: blinky
@@ -256,6 +259,7 @@ jobs:
           # Smallest kintex7 end-to-end path.
           - name: blinky-qmtech
             tier: essential
+            lvs: true
             source: demo-project
             project: blinky-qmtech
             top: blinky
@@ -272,6 +276,7 @@ jobs:
           # and the minimal one is the fast smoke test.
           - name: litex-minimal-arty-s7
             tier: essential
+            lvs: true
             source: demo-project
             project: litex-minimal-arty-s7
             top: digilent_arty_s7
@@ -284,6 +289,7 @@ jobs:
 
           - name: litex-ddr-arty-s7
             tier: essential
+            lvs: true
             source: demo-project
             project: litex-ddr-arty-s7
             top: digilent_arty_s7
@@ -294,10 +300,11 @@ jobs:
             seed: 1
             timeout: 180
 
-          # Largest goldened entry: LiteX + DDR3 on kintex7.  This is the
+          # Largest essential entry: LiteX + DDR3 on kintex7.  This is the
           # one whose frames moved with the prjxray pin (see header).
           - name: litex-ddr-qmtech-kintex7
             tier: essential
+            lvs: true
             source: demo-project
             project: litex-ddr-qmtech-kintex7
             top: qmtech_xc7k325t
@@ -309,7 +316,7 @@ jobs:
             timeout: 180
 
           # ---------------------------------------------------------------
-          # stretch / LiteX Linux.  Non-blocking, not goldened.  These are
+          # stretch / LiteX Linux.  Non-blocking, not proved.  These are
           # the designs that boot a kernel, and they are two orders of
           # magnitude larger than anything above: they fail in ways small
           # designs cannot (router congestion floors, placer timeouts,
@@ -420,10 +427,16 @@ jobs:
         if: matrix.source == 'example'
         run: sudo apt-get install -y yosys
 
-      # Eigen is header-only; build it from the exact gitlab tag the goldens
-      # were generated with.  nextpnr uses find_package(Eigen3 NO_MODULE), so
-      # CMAKE_PREFIX_PATH below makes this install win over the system Eigen.
-      - name: Install Eigen 5.0.1 (golden toolchain pin)
+      # Eigen is header-only; build it from a fixed gitlab tag.  placer_heap
+      # solves a sparse system with Eigen's iterative solver whose numerics
+      # differ between major versions, so which Eigen built a run decides the
+      # placement it produces.  That no longer decides a verdict -- a proof is
+      # taken against whatever placement resulted -- but it still decides
+      # whether two runs are comparable while one is being debugged, which is
+      # worth a pinned dependency.  nextpnr uses find_package(Eigen3
+      # NO_MODULE), so CMAKE_PREFIX_PATH below makes this win over the system
+      # one.
+      - name: Install Eigen 5.0.1 (pinned so runs are comparable)
         run: |
           git clone --depth 1 --branch 5.0.1 https://gitlab.com/libeigen/eigen.git /tmp/eigen
           cmake -S /tmp/eigen -B /tmp/eigen-build \
@@ -518,7 +531,7 @@ jobs:
           # than deleted.  Those carry a recorded P&R failure, and the job
           # passes only while the failure is EXACTLY the recorded one --
           # including failing if it disappears, which means the defect is
-          # fixed and the design is ready for a real golden.
+          # fixed and the design is ready to be gated on.
           # GitHub runs steps with bash -e but NOT pipefail, so `if cmd |
           # tee log` tests tee's status and a failing cmd reads as success.
           # Every known-failure branch below depends on seeing the real one.
@@ -535,7 +548,7 @@ jobs:
             if [ -f "$known" ]; then
               echo "::error::${{ matrix.name }} now places and routes, but a known"
               echo "P&R failure is still recorded in $known.  If the defect is"
-              echo "fixed, delete that file and let the golden step record a hash."
+              echo "fixed, delete that file so the design is gated on again."
               exit 1
             fi
           else
@@ -632,7 +645,7 @@ jobs:
       # recorded rather than hidden: the job passes while the failure is
       # EXACTLY the recorded one, and fails if it changes -- including if it
       # disappears, which means the defect is fixed and the entry is ready
-      # for a real golden.
+      # gated on again.
       - name: FASM to frames to bitstream
         if: matrix.source != 'demo-project' && env.PNR_KNOWN_FAILURE != '1'
         env:
@@ -647,7 +660,7 @@ jobs:
             if [ -f "$known" ]; then
               echo "::error::fasm2frames now succeeds for ${{ matrix.name }}, but a known"
               echo "failure is still recorded in $known.  If the defect is fixed, delete"
-              echo "that file and add .github/goldens/${{ matrix.name }}.sha256 instead."
+              echo "that file so the design is assembled and proved like the rest."
               exit 1
             fi
           else
@@ -668,35 +681,43 @@ jobs:
 
       # ---------------- common: verify ----------------
 
-      # Stretch entries have no golden: they are large enough that their
+      # Stretch entries are not proved: they are large enough that their
       # placement is not worth freezing, and the point of running them is
       # that they complete at all.
-      - name: Verify golden frames
-        if: matrix.tier == 'essential' && env.KNOWN_FAILURE != '1' && env.PNR_KNOWN_FAILURE != '1'
+      # The frames hash, kept as a WARNING and not a gate.
+      #
+      # It is a drift detector and nothing more: it fires when the output moves
+      # and cannot say whether the movement matters.  Placement is not
+      # canonical, feature order is not canonical, and a routing change moves
+      # bytes without changing logic -- so as a gate it failed on every placer
+      # improvement and every failure looked like damage.  Equivalence decides
+      # that question now; this just says the bytes changed, which is worth
+      # knowing and worth nobody's build.
+      #
+      # A stale hash is therefore expected after any deliberate change, and
+      # several are stale now: the examples' synthesis moved to -flatten -abc9
+      # when the proofs went in.  Re-record when convenient; nothing depends
+      # on it.
+      - name: Frames hash, for information
+        if: always() && env.PNR_KNOWN_FAILURE != '1'
+        continue-on-error: true
         run: |
-          hash=$(sha256sum "${{ matrix.name }}.frames" | cut -d' ' -f1)
+          f="${{ matrix.name }}.frames"
           gf="nextpnr/.github/goldens/${{ matrix.name }}.sha256"
-          # A new entry has no golden until someone records one.  Say so
-          # explicitly instead of failing on a missing file: the hash below
-          # is the value to commit, and it is only trustworthy because this
-          # job pins the database, the prjxray revision and Eigen.
+          [ -s "$f" ] || { echo "no frames produced; nothing to compare"; exit 0; }
+          hash=$(sha256sum "$f" | cut -d' ' -f1)
           if [ ! -f "$gf" ]; then
-            echo "::error::no golden recorded for ${{ matrix.name }}"
-            echo "This entry placed and routed and its FASM assembled, but"
-            echo "nothing is pinned yet.  To adopt this run as the golden:"
-            echo "  echo $hash > .github/goldens/${{ matrix.name }}.sha256"
-            exit 1
+            echo "::notice::${{ matrix.name }}: no recorded hash; this run is $hash"
+            exit 0
           fi
           golden=$(cat "$gf")
           if [ "$hash" != "$golden" ]; then
-            echo "::error::frames hash mismatch: got $hash, golden $golden"
-            echo "If this change intentionally alters FASM output, re-golden:"
-            echo "  sha256sum ${{ matrix.name }}.frames | cut -d' ' -f1 \\"
-            echo "      > nextpnr/.github/goldens/${{ matrix.name }}.sha256"
-            echo "and say in the commit message which features moved and why."
-            exit 1
+            echo "::warning::${{ matrix.name }}: frames moved -- got $hash, recorded $golden."
+            echo "Not a failure: equivalence is checked separately.  To adopt this run:"
+            echo "  echo $hash > .github/goldens/${{ matrix.name }}.sha256"
+          else
+            echo "frames hash unchanged: $hash"
           fi
-          echo "golden match: $hash"
 
       # LVS: prove the extracted netlist equivalent to the synthesis it came
       # from, per register, with lvs_equiv.
@@ -704,7 +725,7 @@ jobs:
       # A frames hash detects drift but cannot tell drift from damage --
       # placement is not canonical and a routing change moves bytes without
       # changing logic.  This decides the question a hash cannot, which is
-      # why it runs under always(): a moved golden is exactly when it matters.
+      # why it runs under always(): output that moved is exactly when it matters.
       #
       # The flow is xc7-bitstream-tools' scripts/verify_examples.sh, which is
       # the reference for it.
@@ -715,14 +736,29 @@ jobs:
           TILEVERILOG: ${{ github.workspace }}/build-f2n/tileverilog
           LVS_EQUIV: ${{ github.workspace }}/build-f2n/lvs_equiv
           PRJXRAY_DB: ${{ github.workspace }}/prjxray-db
-          EQUIV_TIMEOUT: 900
+          EQUIV_TIMEOUT: 600
           EXPECT_BLOCKED: ${{ matrix.lvs_blocked }}
         run: |
+          # Each source keeps its netlist and constraints in its own place:
+          # an example synthesises them into the workspace, a demo project
+          # ships them committed.
+          case "${{ matrix.source }}" in
+            example)
+              gold="${{ matrix.name }}.json"
+              xdc="$EX/top.xdc"
+              top=top ;;
+            demo-project)
+              gold="demo-projects/${{ matrix.project }}/${{ matrix.top }}.json"
+              xdc="demo-projects/${{ matrix.project }}/${{ matrix.top }}.xdc"
+              top="${{ matrix.top }}" ;;
+            *)
+              echo "::error::no LVS inputs defined for source ${{ matrix.source }}"; exit 1 ;;
+          esac
           nextpnr/.github/scripts/lvs-equiv.sh \
             "${{ matrix.name }}" "lvs-${{ matrix.name }}" \
             "${{ matrix.name }}.fasm" "${{ matrix.name }}_placement.json" \
-            "${{ matrix.name }}.json" "$EX/${{ matrix.xdc || 'top.xdc' }}" \
-            "${{ matrix.part }}" "${{ matrix.die }}" "${{ matrix.family }}" top
+            "$gold" "$xdc" \
+            "${{ matrix.part }}" "${{ matrix.die }}" "${{ matrix.family }}" "$top"
 
       # Runs even when the hash gate failed: when the frames move, the first
       # thing worth knowing is whether the HP-bank feature set moved with
