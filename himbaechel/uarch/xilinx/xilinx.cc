@@ -309,7 +309,7 @@ bool XilinxImpl::is_pip_unavail(PipId pip) const
         if (!design_has_bufr_valid) {
             design_has_bufr = false;
             for (auto &cell : ctx->cells)
-                if (cell.second->type == id_BUFR) {
+if (cell.second->type.in(id_BUFR, id_BUFR_BUFR)) {
                     design_has_bufr = true;
                     break;
                 }
