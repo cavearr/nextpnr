@@ -50,19 +50,30 @@ output at all.  See `mac_for_cpu()` in the generator.
 
 ## The BIOS in this netlist
 
-The netlist carries the SoC's BIOS in its ROM, so which BIOS matters.  This
-one has bounded waits in `sdcard_wait_cmd_done()` and
-`sdcard_wait_data_done()`.  Without them the BIOS hangs outright on this
-board: those loops wait on the SD core's "done" bit, the only timeout
-available is the core's own timeout bit, and a core seeing no bus activity
-sets neither -- which is exactly what the open flow's four missing IN_DIFF
-input-buffer bits produce.  Since sdcard boot runs at priority 30 and network
-boot at 50, the hang comes twenty levels before the board would have
-netbooted, and the only way past it is to interrupt the BIOS by hand.
+The netlist carries the SoC's BIOS in its ROM, so which BIOS was built is
+part of what the netlist is -- and the one this entry first shipped hangs the
+board.
 
-With the waits bounded, a dead SD interface costs one timeout and the boot
-continues.  Nothing in CI boots this design, but a netlist whose BIOS hangs
-is a poor regression baseline, and the difference is invisible in the FASM.
+`sdcard_wait_cmd_done()` and `sdcard_wait_data_done()` waited on the SD
+core's "done" bit with `for(;;)`, and the only timeout they could report was
+the core's own timeout bit.  A core that sees no bus activity sets neither,
+so an SD card that does not respond hangs the BIOS outright.  Since sdcard
+boot runs at priority 30 and network boot at 50, that hang arrives twenty
+levels before the board would have netbooted, and the only way past it is to
+interrupt the BIOS by hand.
+
+This netlist is from a build whose BIOS bounds both waits, so an
+unresponsive card costs one timeout and the boot continues.  Confirmed on
+hardware: the same design, rebuilt, netboots unattended to a Linux login
+with root over NFS, where the previous one sat in `sdcard_init`.
+
+Note that the hang is a BIOS robustness bug, independent of *why* a card
+fails to answer.  On this board the known cause is the card itself -- a
+full-size SDHC that fails identification where a micro-SDHC in the same slot
+enumerates immediately (`docs/sd-card-findings.md` in xc7-bitstream-tools).
+The open flow's I/O was investigated at length and exonerated: the `IN_DIFF`
+input-buffer bits, once suspected, were tested across three builds with no
+effect.
 
 ## A caveat if you build a bitstream from this
 
