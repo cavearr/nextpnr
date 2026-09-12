@@ -123,6 +123,7 @@ jobs:
           # the only entry with a legacy-flow feature set to compare to.
           - name: vc707-johnson
             tier: essential
+            lvs: true
             source: example
             design: vc707-johnson
             family: virtex7
@@ -136,6 +137,7 @@ jobs:
           # the receiver slew line was guarded on !is_output.
           - name: vc707-hp-diffio
             tier: essential
+            lvs: true
             source: example
             design: vc707-hp-diffio
             family: virtex7
@@ -149,6 +151,7 @@ jobs:
           # that mapping is asserted from the database alone.
           - name: vc707-idelay
             tier: essential
+            lvs: true
             source: example
             design: vc707-idelay
             family: virtex7
@@ -163,6 +166,7 @@ jobs:
           # BUFGCTRL_X0Y0..15, TOP holds X0Y16..31).
           - name: vc707-multibufg
             tier: essential
+            lvs: true
             source: example
             design: vc707-multibufg
             family: virtex7
@@ -190,6 +194,7 @@ jobs:
           # lowering that ORs the write-enables together still builds.
           - name: vc707-bram
             tier: essential
+            lvs: true
             source: example
             design: vc707-bram
             family: virtex7
@@ -203,6 +208,7 @@ jobs:
           # default of 1 degree instead of UG472's 0 went unnoticed.
           - name: vc707-mmcm
             tier: essential
+            lvs: true
             source: example
             design: vc707-mmcm
             family: virtex7
@@ -215,6 +221,7 @@ jobs:
           # this gate are built without one).
           - name: vc707-dsp
             tier: essential
+            lvs: true
             source: example
             design: vc707-dsp
             family: virtex7
@@ -229,6 +236,7 @@ jobs:
           # Smallest artix7 end-to-end path.
           - name: blinky-digilent-arty
             tier: essential
+            lvs: true
             source: demo-project
             project: blinky-digilent-arty
             top: blinky
@@ -242,6 +250,7 @@ jobs:
           # Smallest kintex7 end-to-end path.
           - name: blinky-qmtech
             tier: essential
+            lvs: true
             source: demo-project
             project: blinky-qmtech
             top: blinky
@@ -451,6 +460,15 @@ jobs:
           chmod +x bin/nextpnr-xilinx
           echo "$GITHUB_WORKSPACE/bin" >> "$GITHUB_PATH"
 
+      # LVS needs an extractor.  Only built where it is used: a design large
+      # enough to matter takes over an hour to extract, so the eligible set is
+      # the small ones.
+      - name: Build fasm2netlist
+        if: matrix.lvs
+        run: |
+          cmake -S nextpnr/3rdparty/fasm2netlist -B build-f2n -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-f2n --parallel 4
+
       - name: Build prjxray tools
         run: |
           cd prjxray
@@ -498,6 +516,7 @@ jobs:
                -o xdc="$EX/top.xdc" \
                --json "${{ matrix.name }}.json" \
                -o fasm="${{ matrix.name }}.fasm" \
+               ${{ matrix.lvs && format('-o placement={0}_placement.json', matrix.name) || '' }} \
                --router router2 2>&1 | tee pnr.log; then
             if [ -f "$known" ]; then
               echo "::error::${{ matrix.name }} now places and routes, but a known"
@@ -539,8 +558,12 @@ jobs:
             "$GITHUB_WORKSPACE/bin/"*) ;;
             *) echo "::error::gate is not using this PR's nextpnr-himbaechel"; exit 1 ;;
           esac
+          PLACEMENT=""
+          if [ -n "${{ matrix.lvs }}" ]; then
+            PLACEMENT="-o placement=$GITHUB_WORKSPACE/${{ matrix.name }}_placement.json"
+          fi
           make -C "demo-projects/${{ matrix.project }}" "${{ matrix.top }}.frames" \
-               PNR_ARGS="--seed $SEED"
+               PNR_ARGS="--seed $SEED $PLACEMENT"
           make -C "demo-projects/${{ matrix.project }}" all PNR_ARGS="--seed $SEED"
           cp "demo-projects/${{ matrix.project }}/${{ matrix.top }}.fasm" "${{ matrix.name }}.fasm"
           cp "demo-projects/${{ matrix.project }}/${{ matrix.top }}.frames" "${{ matrix.name }}.frames"
@@ -660,6 +683,29 @@ jobs:
             exit 1
           fi
           echo "golden match: $hash"
+
+      # LVS: extract a netlist back out of the FASM and check it against
+      # nextpnr's own placement dump from the same run.
+      #
+      # Deliberately always(): a moved golden is exactly when this matters.
+      # A frames hash cannot tell drift from damage -- placement is not
+      # canonical and a routing change moves bytes without changing logic --
+      # whereas every assertion here is relational, comparing the extraction
+      # against the placement it was given rather than against a constant.
+      # So when a golden moves, this says whether the design still is what it
+      # was.
+      - name: LVS against the placement dump
+        if: always() && matrix.lvs && env.PNR_KNOWN_FAILURE != '1'
+        run: |
+          python3 nextpnr/.github/scripts/lvs-check.py \
+            --exe build-f2n/fasm2netlist \
+            --f2n-dir nextpnr/3rdparty/fasm2netlist \
+            --fasm "${{ matrix.name }}.fasm" \
+            --placement "${{ matrix.name }}_placement.json" \
+            --db prjxray-db \
+            --family ${{ matrix.family }} \
+            --device ${{ matrix.die }} \
+            --design ${{ matrix.name }}
 
       # Runs even when the hash gate failed: when the frames move, the first
       # thing worth knowing is whether the HP-bank feature set moved with
