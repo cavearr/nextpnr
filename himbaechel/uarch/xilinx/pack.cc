@@ -583,9 +583,9 @@ void XilinxPacker::constrain_srl_cascades()
     std::vector<CellInfo *> offslice;
     std::unordered_set<CellInfo *> visited;
     int clusters = 0;
-    for (auto head : srls) {
+    auto process_chain = [&](CellInfo *head) {
         if (prev_srl.count(head))
-            continue;
+            return;
         std::vector<CellInfo *> chain;
         for (CellInfo *cur = head; cur != nullptr;) {
             chain.push_back(cur);
@@ -627,7 +627,9 @@ void XilinxPacker::constrain_srl_cascades()
             if (next_srl.count(tail))
                 offslice.push_back(tail);
         }
-    }
+    };
+    for (auto head : srls)
+        process_chain(head);
     // A chain with no head is a pure Q31 cycle: some link has to go through
     // the fabric, and any of them may -- break the cycle at an arbitrary
     // element and cluster the rest as one open chain.
@@ -636,11 +638,10 @@ void XilinxPacker::constrain_srl_cascades()
             continue;
         log_warning("SRL cell '%s' is part of a pure Q31 cascade cycle; breaking the cycle at its Q31 link\n",
                     ci->name.c_str(ctx));
-        prev_srl.erase(next_srl.at(ci));
+        CellInfo *cycle_next = next_srl.at(ci);
+        prev_srl.erase(cycle_next);
         next_srl.erase(ci);
-        // (re-run is simplest: tail recursion depth is at most one because a
-        // broken cycle is an ordinary chain)
-        return constrain_srl_cascades();
+        process_chain(cycle_next);
     }
 
     // Cells whose Q31 net is not one of the in-slice cascade links kept

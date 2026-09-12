@@ -34,6 +34,12 @@ all: $(foreach t,$(TESTS),$(t).bit)
 
 all-uf2: $(foreach t,$(TESTS),$(t).bit.slot$(SLOT).uf2)
 
+%.bit:
+	$(MAKE) DESIGN=$* TOP=$* XDC=$*.xdc bit
+
+%.bit.slot$(SLOT).uf2:
+	$(MAKE) DESIGN=$* TOP=$* XDC=$*.xdc SLOT=$(SLOT) uf2
+
 $(DESIGN).json: $(DESIGN).v
 	$(YOSYS) -p "synth_xilinx -flatten -abc9 -nobram -arch xc7 -top $(TOP); write_json $(DESIGN).json" $(DESIGN).v
 

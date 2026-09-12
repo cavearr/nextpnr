@@ -1313,6 +1313,7 @@ void XC7Packer::pack_gt()
                            refclk1_used_attr = ctx->id("_GTREFCLK1_USED");
             bool refclk0_used = false, refclk1_used = false;
             bool is_gtp = ci->type == id_GTPE2_COMMON;
+            std::vector<std::pair<IdString, IdString>> to_rename;
 
             fold_inverter(ci, "DRPCLK");
             if (is_gtp) {
@@ -1352,7 +1353,7 @@ void XC7Packer::pack_gt()
                         log_warning("Internal REFCLK is used for instance '%s', which is not recommended. "
                                     "Connecting refclock to port %s instead.\n",
                                     ci->name.c_str(ctx), gtg_port.c_str(ctx));
-                        ci->renamePort(port.first, gtg_port);
+                        to_rename.emplace_back(port.first, gtg_port);
                         internal_refclk = true;
                         ci->params[ctx->id("_GTGREFCLK_USED")] = Property(1, 1);
                     } else { // driver is IBUFDS_GTE2
@@ -1385,6 +1386,8 @@ void XC7Packer::pack_gt()
                     }
                 }
             }
+            for (auto [from, to] : to_rename)
+                ci->renamePort(from, to);
             ci->params[ctx->id("_BOTH_GTREFCLK_USED")] = Property(refclk0_used && refclk1_used);
         } else if (ci->type == id_GTPE2_CHANNEL || ci->type == id_GTXE2_CHANNEL) {
             bool is_gtp = ci->type == id_GTPE2_CHANNEL;
