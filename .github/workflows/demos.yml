@@ -424,7 +424,7 @@ jobs:
           pip install fasm intervaltree progressbar2 simplejson pyyaml
 
       - name: Install yosys
-        if: matrix.source == 'example'
+        if: matrix.source == 'example' || matrix.lvs
         run: sudo apt-get install -y yosys
 
       # Eigen is header-only; build it from a fixed gitlab tag.  placer_heap
