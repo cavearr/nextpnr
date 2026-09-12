@@ -209,8 +209,6 @@ jobs:
           - name: vc707-mmcm
             tier: essential
             lvs: true
-            lvs_blocked: >-
-              tileverilog extracts the MMCM as MMCME2_ADV where synthesis emitted MMCME2_BASE, so led[0], which reads LOCKED, has no comparable cone
             source: example
             design: vc707-mmcm
             family: virtex7
@@ -224,8 +222,6 @@ jobs:
           - name: vc707-dsp
             tier: essential
             lvs: true
-            lvs_blocked: >-
-              tileverilog does not extract DSP48E1 from the bitstream at all, so acc[0], which reads the DSP's P output, has no comparable cone
             source: example
             design: vc707-dsp
             family: virtex7
