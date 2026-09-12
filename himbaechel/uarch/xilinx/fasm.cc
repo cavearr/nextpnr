@@ -288,8 +288,8 @@ struct FasmBackend
             CellInfo *ci = cell.second.get();
             if (ci->type == id_BUFGCTRL && ci->bel != BelId()) {
                 SiteIndex site = uarch->get_bel_site(ci->bel);
-                const auto &site_data = uarch->tile_extra_data(site.tile)->sites[site.site];
-                bufgctrl_bound_slots.insert({site.tile, site_data.site_y});
+                auto rel = uarch->rel_site_loc(site);
+                bufgctrl_bound_slots.insert({site.tile, rel.y});
             }
         }
     }
