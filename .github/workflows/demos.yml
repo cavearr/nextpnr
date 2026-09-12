@@ -123,6 +123,7 @@ jobs:
           # the only entry with a legacy-flow feature set to compare to.
           - name: vc707-johnson
             tier: essential
+            synth: -nobram
             lvs: true
             source: example
             design: vc707-johnson
@@ -137,6 +138,7 @@ jobs:
           # the receiver slew line was guarded on !is_output.
           - name: vc707-hp-diffio
             tier: essential
+            synth: -nobram
             lvs: true
             source: example
             design: vc707-hp-diffio
@@ -151,6 +153,7 @@ jobs:
           # that mapping is asserted from the database alone.
           - name: vc707-idelay
             tier: essential
+            synth: -nobram
             lvs: true
             source: example
             design: vc707-idelay
@@ -166,6 +169,7 @@ jobs:
           # BUFGCTRL_X0Y0..15, TOP holds X0Y16..31).
           - name: vc707-multibufg
             tier: essential
+            synth: -nobram
             lvs: true
             source: example
             design: vc707-multibufg
@@ -181,6 +185,7 @@ jobs:
           # their carry chains consume each carry-out internally.
           - name: vc707-carry
             tier: essential
+            synth: -nobram
             source: example
             design: vc707-carry
             family: virtex7
@@ -208,6 +213,7 @@ jobs:
           # default of 1 degree instead of UG472's 0 went unnoticed.
           - name: vc707-mmcm
             tier: essential
+            synth: -nobram
             lvs: true
             source: example
             design: vc707-mmcm
@@ -221,6 +227,7 @@ jobs:
           # this gate are built without one).
           - name: vc707-dsp
             tier: essential
+            synth: -nobram
             lvs: true
             source: example
             design: vc707-dsp
@@ -495,11 +502,16 @@ jobs:
           mapfile -t sources < <(find "$EX" -maxdepth 1 -name '*.v' -print | sort)
           # -flatten -abc9 is what xc7-bitstream-tools' verify_examples.sh
           # synthesises with, and the LVS proof depends on both: without
-          # -flatten the logic hides inside a submodule the miter cannot
+          # -flatten the logic hides inside a submodule the comparison cannot
           # traverse, and without -abc9 the mapper emits MUXF7/MUXF8 trees.
+          #
+          # -nobram is per-design and NOT a default.  It keeps a small example
+          # in LUTs where that is what it means to exercise; a design that
+          # means to use block RAM leaves it off, and anything inferring a ROM
+          # -- every LiteX SoC's BIOS -- would be forced into LUTs by it.
           yosys -p "read_verilog -lib +/xilinx/cells_sim.v; \
                     read_verilog ${sources[*]}; \
-                    synth_xilinx -flatten -abc9 -nobram -arch xc7 -top top; \
+                    synth_xilinx -flatten -abc9 ${{ matrix.synth }} -arch xc7 -top top; \
                     write_json ${{ matrix.name }}.json"
           # An example may be in the gate precisely because it does NOT
           # build: a minimal reproducer for a defect is worth more pinned
