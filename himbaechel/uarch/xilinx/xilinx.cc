@@ -322,6 +322,23 @@ if (cell.second->type.in(id_BUFR, id_BUFR_BUFR)) {
                 d.find("RCLK_OUT") != std::string::npos || d.find("RCLK2RCLK") != std::string::npos)
                 return true;
         }
+        IdString tt = IdString(chip_tile_info(ctx->chip_info, pip.tile).type_name);
+        std::string tts = tt.str(ctx);
+        bool tile_is_clk_bufg_r =
+                (boost::starts_with(tts, "CLK_BUFG_TOP_R") || boost::starts_with(tts, "CLK_BUFG_BOT_R"));
+        if (tile_is_clk_bufg_r) {
+            bool has_bound_bufgctrl = false;
+            const auto &tile_data = chip_tile_info(ctx->chip_info, pip.tile);
+            for (int32_t i = 0; i < tile_data.bels.ssize(); ++i) {
+                CellInfo *bound = ctx->getBoundBelCell(BelId(pip.tile, i));
+                if (bound != nullptr && bound->type == id_BUFGCTRL) {
+                    has_bound_bufgctrl = true;
+                    break;
+                }
+            }
+            if (!has_bound_bufgctrl)
+                return true;
+        }
     }
 
     // A pip prjxray has no bits for cannot be programmed, so routing through it
