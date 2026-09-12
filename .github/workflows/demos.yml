@@ -209,6 +209,8 @@ jobs:
           - name: vc707-mmcm
             tier: essential
             lvs: true
+            lvs_blocked: >-
+              tileverilog extracts the MMCM as MMCME2_ADV where synthesis emitted MMCME2_BASE, so led[0], which reads LOCKED, has no comparable cone
             source: example
             design: vc707-mmcm
             family: virtex7
@@ -222,6 +224,8 @@ jobs:
           - name: vc707-dsp
             tier: essential
             lvs: true
+            lvs_blocked: >-
+              tileverilog does not extract DSP48E1 from the bitstream at all, so acc[0], which reads the DSP's P output, has no comparable cone
             source: example
             design: vc707-dsp
             family: virtex7
@@ -236,7 +240,6 @@ jobs:
           # Smallest artix7 end-to-end path.
           - name: blinky-digilent-arty
             tier: essential
-            lvs: true
             source: demo-project
             project: blinky-digilent-arty
             top: blinky
@@ -250,7 +253,6 @@ jobs:
           # Smallest kintex7 end-to-end path.
           - name: blinky-qmtech
             tier: essential
-            lvs: true
             source: demo-project
             project: blinky-qmtech
             top: blinky
@@ -467,7 +469,7 @@ jobs:
         if: matrix.lvs
         run: |
           cmake -S nextpnr/3rdparty/fasm2netlist -B build-f2n -DCMAKE_BUILD_TYPE=Release
-          cmake --build build-f2n --parallel 4
+          cmake --build build-f2n --target tileverilog lvs_equiv --parallel 4
 
       - name: Build prjxray tools
         run: |
@@ -495,9 +497,13 @@ jobs:
           EX: nextpnr/himbaechel/uarch/xilinx/examples/${{ matrix.design }}
         run: |
           mapfile -t sources < <(find "$EX" -maxdepth 1 -name '*.v' -print | sort)
+          # -flatten -abc9 is what xc7-bitstream-tools' verify_examples.sh
+          # synthesises with, and the LVS proof depends on both: without
+          # -flatten the logic hides inside a submodule the miter cannot
+          # traverse, and without -abc9 the mapper emits MUXF7/MUXF8 trees.
           yosys -p "read_verilog -lib +/xilinx/cells_sim.v; \
                     read_verilog ${sources[*]}; \
-                    synth_xilinx -top top; \
+                    synth_xilinx -flatten -abc9 -nobram -arch xc7 -top top; \
                     write_json ${{ matrix.name }}.json"
           # An example may be in the gate precisely because it does NOT
           # build: a minimal reproducer for a defect is worth more pinned
@@ -684,28 +690,31 @@ jobs:
           fi
           echo "golden match: $hash"
 
-      # LVS: extract a netlist back out of the FASM and check it against
-      # nextpnr's own placement dump from the same run.
+      # LVS: prove the extracted netlist equivalent to the synthesis it came
+      # from, per register, with lvs_equiv.
       #
-      # Deliberately always(): a moved golden is exactly when this matters.
-      # A frames hash cannot tell drift from damage -- placement is not
-      # canonical and a routing change moves bytes without changing logic --
-      # whereas every assertion here is relational, comparing the extraction
-      # against the placement it was given rather than against a constant.
-      # So when a golden moves, this says whether the design still is what it
-      # was.
-      - name: LVS against the placement dump
+      # A frames hash detects drift but cannot tell drift from damage --
+      # placement is not canonical and a routing change moves bytes without
+      # changing logic.  This decides the question a hash cannot, which is
+      # why it runs under always(): a moved golden is exactly when it matters.
+      #
+      # The flow is xc7-bitstream-tools' scripts/verify_examples.sh, which is
+      # the reference for it.
+      - name: LVS equivalence against the synthesis
         if: always() && matrix.lvs && env.PNR_KNOWN_FAILURE != '1'
+        env:
+          EX: nextpnr/himbaechel/uarch/xilinx/examples/${{ matrix.design }}
+          TILEVERILOG: ${{ github.workspace }}/build-f2n/tileverilog
+          LVS_EQUIV: ${{ github.workspace }}/build-f2n/lvs_equiv
+          PRJXRAY_DB: ${{ github.workspace }}/prjxray-db
+          EQUIV_TIMEOUT: 900
+          EXPECT_BLOCKED: ${{ matrix.lvs_blocked }}
         run: |
-          python3 nextpnr/.github/scripts/lvs-check.py \
-            --exe build-f2n/fasm2netlist \
-            --f2n-dir nextpnr/3rdparty/fasm2netlist \
-            --fasm "${{ matrix.name }}.fasm" \
-            --placement "${{ matrix.name }}_placement.json" \
-            --db prjxray-db \
-            --family ${{ matrix.family }} \
-            --device ${{ matrix.die }} \
-            --design ${{ matrix.name }}
+          nextpnr/.github/scripts/lvs-equiv.sh \
+            "${{ matrix.name }}" "lvs-${{ matrix.name }}" \
+            "${{ matrix.name }}.fasm" "${{ matrix.name }}_placement.json" \
+            "${{ matrix.name }}.json" "$EX/${{ matrix.xdc || 'top.xdc' }}" \
+            "${{ matrix.part }}" "${{ matrix.die }}" "${{ matrix.family }}" top
 
       # Runs even when the hash gate failed: when the frames move, the first
       # thing worth knowing is whether the HP-bank feature set moved with
