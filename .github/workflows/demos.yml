@@ -214,6 +214,15 @@ jobs:
             die: xc7vx485t
             timeout: 90
 
+          # ROUTES NOW.  This was a recorded P&R failure: the design could not
+          # be routed, on the hypothesis that three signals contend for two
+          # slice exits once a carry packs with a 5FF.  With the placer
+          # settings the hardware flow uses it places and routes and makes
+          # 207.21 MHz against 200.  Whatever the packer was doing wrong, it
+          # was reachable only from the placement the old settings produced,
+          # so the design is gated normally again and its recorded failure is
+          # deleted.
+          #
           # A carry position whose sum AND whose carry-out both feed fabric.
           # The subslice has two exits -- the hardwired direct pin and the
           # configurable xMUX -- so this is legal, and a packer that charges
@@ -309,7 +318,12 @@ jobs:
           # Two entries because the DDR one reaches the memory controller
           # and the minimal one is the fast smoke test.
           # RECORDED P&R FAILURE: the same SING tile as litex-ddr-arty-s7
-          # below, reached by the other clock pin.  Both boards' constraint
+          # below, reached by whichever clock pin the router gives up on
+          # first -- which depends on placement, so both entries record the
+          # tile and site and stop before the pin name.  Recording
+          # CLKDIVINV_OUT for one and CLKINV_OUT for the other looked like
+          # two distinct defects; changing the placer settings swapped them
+          # over, which is how it became clear they are one.  Both boards' constraint
           # file pins ddram_reset_n to J6, whose OLOGIC is in
           # RIOI3_SING_X43Y49; here it is the OLOGIC clock rather than the
           # divider, and segbits+ppips for RIOI3_SING carry 2 OLOGIC*CLK*
