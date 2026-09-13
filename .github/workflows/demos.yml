@@ -616,9 +616,11 @@ jobs:
           # An example may be in the gate precisely because it does NOT
           # build: a minimal reproducer for a defect is worth more pinned
           # than deleted.  Those carry a recorded P&R failure, and the job
-          # passes only while the failure is EXACTLY the recorded one --
-          # including failing if it disappears, which means the defect is
-          # fixed and the design is ready to be gated on.
+          # FAILS either way -- a design the flow cannot build must not
+          # report green, because a green tick is a claim that it can.  What
+          # the record buys is which failure it is: still the known defect,
+          # something new, or gone (which means it is fixed and the record
+          # should be deleted).  Three outcomes, three messages, all red.
           # GitHub runs steps with bash -e but NOT pipefail, so `if cmd |
           # tee log` tests tee's status and a failing cmd reads as success.
           # Every known-failure branch below depends on seeing the real one.
@@ -640,16 +642,17 @@ jobs:
             fi
           else
             if [ -f "$known" ] && grep -qFf "$known" pnr.log; then
-              # A warning, not a bare echo: this job is about to go green on a
-              # design that DOES NOT BUILD, and a green tick nobody can read
-              # past is how a pinned defect becomes a forgotten one.  The
-              # annotation puts it on the run summary next to the frames-hash
-              # drift, where it can be seen without opening a log.
-              echo "::warning::${{ matrix.name }}: DOES NOT BUILD -- reproducing its recorded"
-              echo "P&R failure, so this job passes.  $(grep -m1 -Ff "$known" pnr.log)"
-              echo "known P&R defect reproduced: $(grep -m1 -Ff "$known" pnr.log)"
-              echo "PNR_KNOWN_FAILURE=1" >> "$GITHUB_ENV"
-              exit 0
+              # The record says WHICH failure this is.  It does not excuse it:
+              # a design that does not build is a red job, because a green one
+              # states that the flow can build it.  What the record buys is
+              # the distinction between "still the defect we know" and
+              # "something else broke", which is the difference between the
+              # two error messages here.
+              echo "::error::${{ matrix.name }}: DOES NOT BUILD.  This is its recorded"
+              echo "P&R failure, reproduced exactly -- not a new regression:"
+              echo "  $(grep -m1 -Ff "$known" pnr.log)"
+              echo "See the matrix entry in this file for the defect and what closing it needs."
+              exit 1
             fi
             echo "::error::place and route failed for ${{ matrix.name }}"
             tail -20 pnr.log
@@ -694,9 +697,7 @@ jobs:
           #
           # A demo project can also be in the gate BECAUSE it does not build,
           # on the same terms as the examples above: the failure is recorded,
-          # and the job passes only while it is EXACTLY the recorded one --
-          # including failing if it disappears, which means the defect is
-          # fixed and the design is ready to be gated on again.
+          # the job fails, and the record says which failure it is.
           set -o pipefail
           known="nextpnr/.github/references/${{ matrix.name }}.pnr-known-failure"
           if make -C "demo-projects/${{ matrix.project }}" all \
@@ -709,12 +710,17 @@ jobs:
             fi
           else
             if [ -f "$known" ] && grep -qFf "$known" build.log; then
-              # See the note on the example tier's copy of this branch.
-              echo "::warning::${{ matrix.name }}: DOES NOT BUILD -- reproducing its recorded"
-              echo "P&R failure, so this job passes.  $(grep -m1 -Ff "$known" build.log)"
-              echo "known P&R defect reproduced: $(grep -m1 -Ff "$known" build.log)"
-              echo "PNR_KNOWN_FAILURE=1" >> "$GITHUB_ENV"
-              exit 0
+              # The record says WHICH failure this is.  It does not excuse it:
+              # a design that does not build is a red job, because a green one
+              # states that the flow can build it.  What the record buys is
+              # the distinction between "still the defect we know" and
+              # "something else broke", which is the difference between the
+              # two error messages here.
+              echo "::error::${{ matrix.name }}: DOES NOT BUILD.  This is its recorded"
+              echo "P&R failure, reproduced exactly -- not a new regression:"
+              echo "  $(grep -m1 -Ff "$known" build.log)"
+              echo "See the matrix entry in this file for the defect and what closing it needs."
+              exit 1
             fi
             echo "::error::build failed for ${{ matrix.name }}"
             tail -30 build.log
@@ -770,10 +776,10 @@ jobs:
       # ---------------- common: assemble ----------------
 
       # An entry may produce FASM the database cannot assemble.  Those are
-      # recorded rather than hidden: the job passes while the failure is
-      # EXACTLY the recorded one, and fails if it changes -- including if it
-      # disappears, which means the defect is fixed and the entry is ready
-      # gated on again.
+      # recorded rather than hidden.  NOTE this branch still passes on a
+      # reproduced failure, unlike the P&R records above, which now fail:
+      # nothing currently uses it, and it should be brought into line the
+      # first time something does.
       - name: FASM to frames to bitstream
         if: matrix.source != 'demo-project' && env.PNR_KNOWN_FAILURE != '1'
         env:
