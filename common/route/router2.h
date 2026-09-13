@@ -54,6 +54,18 @@ struct Router2Cfg
     // of choosing a less congestion/delay-optimal route
     float estimate_weight;
 
+    // Congestion smoothing: a post-legality rip-up and re-route that makes
+    // tile DENSITY a cost.  router2's own congestion cost is driven by
+    // overuse -- nets illegally sharing a wire -- so once routing is legal
+    // its gradient is flat, and a tile carrying four times its neighbours'
+    // traffic is invisible to it.  Off by default; see
+    // docs/routing-smoothing-pass.md.
+    int smooth_iters = 0;
+    float smooth_weight;
+    float smooth_percentile;
+    float smooth_max_crit;
+    int smooth_max_fanout;
+
     // Print additional performance profiling information
     bool perf_profile = false;
 

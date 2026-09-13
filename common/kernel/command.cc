@@ -394,6 +394,10 @@ po::options_description CommandHandler::getGeneralOptions()
                           "enable experimental timing-driven ripup in router (deprecated; use --tmg-ripup instead)");
 
     general.add_options()("router2-alt-weights", "use alternate router2 weights");
+    general.add_options()("router2-smooth-iters", po::value<int>(),
+                          "post-routing congestion smoothing rounds (0 = off, the default)");
+    general.add_options()("router2-smooth-weight", po::value<float>(),
+                          "how hard smoothing pushes traffic out of crowded tiles (default 1.0)");
 
     general.add_options()("report", po::value<std::string>(),
                           "write timing and utilization report in JSON format to file");
@@ -527,6 +531,10 @@ void CommandHandler::setupContext(Context *ctx)
 
     if (vm.count("router2-alt-weights"))
         ctx->settings[ctx->id("router2/alt-weights")] = true;
+    if (vm.count("router2-smooth-iters"))
+        ctx->settings[ctx->id("router2/smoothIters")] = vm["router2-smooth-iters"].as<int>();
+    if (vm.count("router2-smooth-weight"))
+        ctx->settings[ctx->id("router2/smoothWeight")] = vm["router2-smooth-weight"].as<float>();
 
     if (vm.count("static-dump-density"))
         ctx->settings[ctx->id("static/dump_density")] = true;
