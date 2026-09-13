@@ -444,6 +444,25 @@ jobs:
           # directory.  Nothing in CI boots these, but the netlists are the
           # same ones used on hardware and the distinction is easier to keep
           # than to reintroduce.
+          # The largest design in the gate: 47719 cells against the SMP SoC's
+          # 22396, with DSPs and deep BRAM the smaller entries do not reach.
+          # Rocket in LiteX's `medium` configuration, rv64imac -- NO FPU,
+          # which is the configuration that fits this part rather than a
+          # simplification.  Stretch, and honestly so: it answers whether
+          # nextpnr completes at this scale and what it costs.  No bitstream
+          # from this netlist has been on hardware, so nothing here claims it
+          # runs.
+          - name: vc707-litex-rocket
+            tier: stretch
+            source: netlist
+            design: vc707-litex-rocket
+            netlist: xilinx_vc707.json.gz
+            xdc: xilinx_vc707.xdc
+            family: virtex7
+            part: xc7vx485tffg1761-2
+            die: xc7vx485t
+            timeout: 600
+
           - name: vc707-litex-linux-smp
             tier: stretch
             source: netlist
