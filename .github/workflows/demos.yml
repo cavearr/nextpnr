@@ -640,6 +640,13 @@ jobs:
             fi
           else
             if [ -f "$known" ] && grep -qFf "$known" pnr.log; then
+              # A warning, not a bare echo: this job is about to go green on a
+              # design that DOES NOT BUILD, and a green tick nobody can read
+              # past is how a pinned defect becomes a forgotten one.  The
+              # annotation puts it on the run summary next to the frames-hash
+              # drift, where it can be seen without opening a log.
+              echo "::warning::${{ matrix.name }}: DOES NOT BUILD -- reproducing its recorded"
+              echo "P&R failure, so this job passes.  $(grep -m1 -Ff "$known" pnr.log)"
               echo "known P&R defect reproduced: $(grep -m1 -Ff "$known" pnr.log)"
               echo "PNR_KNOWN_FAILURE=1" >> "$GITHUB_ENV"
               exit 0
@@ -702,6 +709,9 @@ jobs:
             fi
           else
             if [ -f "$known" ] && grep -qFf "$known" build.log; then
+              # See the note on the example tier's copy of this branch.
+              echo "::warning::${{ matrix.name }}: DOES NOT BUILD -- reproducing its recorded"
+              echo "P&R failure, so this job passes.  $(grep -m1 -Ff "$known" build.log)"
               echo "known P&R defect reproduced: $(grep -m1 -Ff "$known" build.log)"
               echo "PNR_KNOWN_FAILURE=1" >> "$GITHUB_ENV"
               exit 0
