@@ -474,6 +474,28 @@ jobs:
             die: xc7vx485t
             timeout: 300
 
+          # The same SoC family again, but with a 64-bit DDR3 interface: the
+          # full 1 GB of the VC707's SODIMM rather than 512 MB, plus a 128 KiB
+          # L2.  It earns its place by being the design that MISSED TIMING --
+          # its DDR controller domain is constrained at 100 MHz and the open
+          # flow reached 75.59, which places, routes, assembles and configures
+          # with DONE asserted and then miscomputes on hardware.  A measured
+          # delay matrix and a higher placer timing weight take it to 106.50
+          # MHz; this entry pins both so the fix cannot quietly rot.  It is the
+          # only entry that overrides PNR_PLACER_FLAGS, and the only one whose
+          # interest is Fmax rather than completion.  See its README.
+          - name: vc707-litex-linux-1gb
+            tier: stretch
+            source: netlist
+            design: vc707-litex-linux-1gb
+            netlist: xilinx_vc707.json.gz
+            xdc: xilinx_vc707.xdc
+            family: virtex7
+            part: xc7vx485tffg1761-2
+            die: xc7vx485t
+            timeout: 600
+            pnr_flags: -o delay-matrix=build --placer-heap-timingweight 100
+
     steps:
       - uses: actions/checkout@v4
         with:
@@ -784,12 +806,21 @@ jobs:
           # --timing-allow-fail: what this tier answers is whether P&R
           # completes and yields assemblable FASM, not what Fmax it reaches.
           # The number is printed so a regression is visible, not gated on.
+          #
+          # An entry may override the gate-wide placer flags.  One does:
+          # vc707-litex-linux-1gb is the design that historically MISSED its
+          # DDR clock constraint, and it needs the measured delay matrix and a
+          # higher timing weight to meet it.  Everything else takes
+          # PNR_PLACER_FLAGS unchanged.
+          ENTRY_PNR_FLAGS="${{ matrix.pnr_flags }}"
+          [ -n "$ENTRY_PNR_FLAGS" ] || ENTRY_PNR_FLAGS="$PNR_PLACER_FLAGS"
+          echo "placer flags: $ENTRY_PNR_FLAGS"
           ./build/nextpnr-himbaechel \
             --device ${{ matrix.part }} \
             -o xdc="$EX/${{ matrix.xdc }}" \
             --json "${{ matrix.name }}.json" \
             -o fasm="${{ matrix.name }}.fasm" \
-            --router router2 --timing-allow-fail $PNR_PLACER_FLAGS 2>&1 | tee pnr.log
+            --router router2 --timing-allow-fail $ENTRY_PNR_FLAGS 2>&1 | tee pnr.log
           grep -E "Max frequency|Device utilisation" -A12 pnr.log | tail -25 || true
 
       # ---------------- common: assemble ----------------
