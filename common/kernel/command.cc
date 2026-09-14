@@ -374,6 +374,10 @@ po::options_description CommandHandler::getGeneralOptions()
     general.add_options()("placer-heap-critexp", po::value<int>(),
                           "placer heap criticality exponent (int, default: 2)");
     general.add_options()("placer-heap-timingweight", po::value<int>(), "placer heap timing weight (int, default: 10)");
+    general.add_options()("placer-heap-congestion-spread",
+                          "congestion-driven spreading: push cells out of routing-congested regions (prototype)");
+    general.add_options()("placer-heap-congestion-weight", po::value<float>(),
+                          "how hard congested tiles are penalised under --placer-heap-congestion-spread (default 0.5)");
     general.add_options()("placer-heap-cell-placement-timeout", po::value<int>(),
                           "allow placer to attempt up to max(10000, total cells^2 / N) iterations to place a cell (int "
                           "N, default: 8, 0 for no timeout)");
@@ -527,6 +531,10 @@ void CommandHandler::setupContext(Context *ctx)
 
     if (vm.count("placer-heap-timingweight"))
         ctx->settings[ctx->id("placerHeap/timingWeight")] = std::to_string(vm["placer-heap-timingweight"].as<int>());
+    if (vm.count("placer-heap-congestion-spread"))
+        ctx->settings[ctx->id("placerHeap/congestionSpread")] = true;
+    if (vm.count("placer-heap-congestion-weight"))
+        ctx->settings[ctx->id("placerHeap/congestionWeight")] = std::to_string(vm["placer-heap-congestion-weight"].as<float>());
 
     if (vm.count("placer-heap-cell-placement-timeout"))
         ctx->settings[ctx->id("placerHeap/cellPlacementTimeout")] =
