@@ -74,8 +74,8 @@ po::options_description XilinxImpl::getUArchOptions()
     specific.add_options()("placement", po::value<std::string>(),
                            "placement dump (JSON: cell -> tile/site/bel/type) for external LVS");
     specific.add_options()("delay-matrix", po::value<std::string>(),
-                           "measure interconnect delay by tile offset instead of using the tuned formula; "
-                           "the value is a cache file, built if absent (use 'build' for no cache)");
+                           "interconnect delay model: on by default (measured per tile offset); 'off' uses the "
+                           "tuned formula; a path caches the table there; 'build' rebuilds it fresh (the default)");
     return specific;
 }
 
@@ -546,12 +546,20 @@ void XilinxImpl::apply_loc_constraints()
 void XilinxImpl::prePlace()
 {
     // Before placement, so the measured table reaches the placer (through
-    // predictDelay and criticality) as well as the router's A* guidance.
+    // predictDelay and criticality) as well as the router's A* guidance.  On by
+    // default: the measured matrix converges the router (rocket goes from 672
+    // grinding iterations to ~23) and calibrates the placer (a 60%-pessimistic
+    // pre-route estimate becomes ~3%), so it is the right behaviour to get
+    // without a flag.  "-o delay-matrix=off" falls back to the tuned formula;
+    // "-o delay-matrix=<file>" caches the table there; "-o delay-matrix=build"
+    // (or absent) builds it fresh.  If the build cannot find enough to measure
+    // on a given device it leaves dm_valid false and the formula stands, so an
+    // untested device degrades rather than breaks.
     const ArchArgs &dm_args = ctx->args;
-    if (dm_args.options.count("delay-matrix")) {
-        std::string f = dm_args.options["delay-matrix"].as<std::string>();
-        if (f != "build")
-            ctx->settings[ctx->id("xilinx/delayMatrixFile")] = f;
+    std::string dm = dm_args.options.count("delay-matrix") ? dm_args.options["delay-matrix"].as<std::string>() : "build";
+    if (dm != "off") {
+        if (dm != "build")
+            ctx->settings[ctx->id("xilinx/delayMatrixFile")] = dm;
         build_delay_matrix();
     }
     apply_loc_constraints();

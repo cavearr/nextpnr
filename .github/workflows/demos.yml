@@ -494,7 +494,7 @@ jobs:
             part: xc7vx485tffg1761-2
             die: xc7vx485t
             timeout: 600
-            pnr_flags: -o delay-matrix=build --placer-heap-timingweight 100
+            pnr_flags: --placer-heap-timingweight 100
 
     steps:
       - uses: actions/checkout@v4
