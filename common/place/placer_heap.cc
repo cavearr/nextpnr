@@ -31,6 +31,7 @@
  *   - To make the placer timing-driven, the bound2bound weights are multiplied by (1 + 10 * crit^2)
  */
 
+#include <cmath>
 #include "placer_heap.h"
 #include <Eigen/Core>
 #include <Eigen/IterativeLinearSolvers>
@@ -1497,6 +1498,7 @@ class HeAPPlacer
         {
             auto startt = std::chrono::high_resolution_clock::now();
             init();
+            init_congestion();
             find_overused_regions();
             for (auto &r : regions) {
                 if (merged_regions.count(r.id))
@@ -1575,6 +1577,10 @@ class HeAPPlacer
         dict<BelBucketId, size_t> type_index;
         std::vector<std::vector<std::vector<int>>> occupancy;
         std::vector<std::vector<std::vector<int>>> fixed_occupancy;
+        // Congestion-driven spreading: per-tile RUDY (normalised to ~1.0 mean).
+        std::vector<std::vector<float>> congestion;
+        bool cong_on = false;
+        float cong_w = 0.0f;
 
         std::vector<std::vector<int>> groups;
         std::vector<std::vector<ChainExtent>> chaines;
@@ -1593,7 +1599,81 @@ class HeAPPlacer
         {
             if (x >= int(fb.at(type)->size()) || y >= int(fb.at(type)->at(x).size()))
                 return 0;
-            return std::max(0, int(fb.at(type)->at(x).at(y).size()) - fixed_occupancy.at(x).at(y).at(type));
+            int raw = std::max(0, int(fb.at(type)->at(x).at(y).size()) - fixed_occupancy.at(x).at(y).at(type));
+            // In congested tiles, tell the spreader there is LESS room than
+            // there really is, so it pushes cells out.  Only above-average
+            // congestion bites, and the reduction is bounded (never below half)
+            // so the strict legaliser -- which uses the REAL capacity -- can
+            // still pack what remains.  The spreader only decides WHERE cells
+            // want to be; final legality is unaffected.
+            if (cong_on && raw > 0 && !congestion.empty()) {
+                float c = congestion.at(x).at(y);
+                if (c > 1.0f) {
+                    float factor = 1.0f / (1.0f + cong_w * (c - 1.0f));
+                    if (factor < 0.5f)
+                        factor = 0.5f;
+                    raw = std::max(1, int(std::floor(raw * factor)));
+                }
+            }
+            return raw;
+        }
+
+        // RUDY-style congestion from the current placement: each net spreads its
+        // wire density (HPWL / bounding-box area) over the tiles its box covers.
+        // No routing -- a placement-domain estimate, cheap enough to run before
+        // every spread.  Normalised so the mean tile is 1.0.
+        void init_congestion()
+        {
+            cong_on = p->cfg.congestionSpread;
+            cong_w = p->cfg.congestionWeight;
+            if (!cong_on)
+                return;
+            int W = p->max_x + 1, H = p->max_y + 1;
+            congestion.assign(W, std::vector<float>(H, 0.0f));
+            auto loc = [&](CellInfo *c, int &x, int &y) -> bool {
+                if (c == nullptr)
+                    return false;
+                auto it = p->cell_locs.find(c->name);
+                if (it == p->cell_locs.end())
+                    return false;
+                x = it->second.x;
+                y = it->second.y;
+                return true;
+            };
+            for (auto &net_pair : ctx->nets) {
+                NetInfo *ni = net_pair.second.get();
+                int minx = W, miny = H, maxx = -1, maxy = -1, cx, cy;
+                if (loc(ni->driver.cell, cx, cy)) {
+                    minx = std::min(minx, cx); maxx = std::max(maxx, cx);
+                    miny = std::min(miny, cy); maxy = std::max(maxy, cy);
+                }
+                for (auto &usr : ni->users) {
+                    if (loc(usr.cell, cx, cy)) {
+                        minx = std::min(minx, cx); maxx = std::max(maxx, cx);
+                        miny = std::min(miny, cy); maxy = std::max(maxy, cy);
+                    }
+                }
+                if (maxx < minx || maxy < miny)
+                    continue;
+                int bw = maxx - minx, bh = maxy - miny;
+                double area = double(bw + 1) * double(bh + 1);
+                double dens = double(bw + bh) / area; // wires per tile the net demands
+                for (int x = minx; x <= maxx; x++)
+                    for (int y = miny; y <= maxy; y++)
+                        congestion.at(x).at(y) += float(dens);
+            }
+            double total = 0; int n = 0;
+            for (int x = 0; x < W; x++)
+                for (int y = 0; y < H; y++) { total += congestion.at(x).at(y); ++n; }
+            float mean = (total > 0 && n > 0) ? float(total / n) : 1.0f;
+            if (mean <= 0) mean = 1.0f;
+            float peak = 0;
+            for (int x = 0; x < W; x++)
+                for (int y = 0; y < H; y++) {
+                    congestion.at(x).at(y) /= mean;
+                    peak = std::max(peak, congestion.at(x).at(y));
+                }
+            log_info("    congestion-spread: RUDY map built, peak %.1fx mean (weight %.2f)\n", peak, cong_w);
         }
 
         bool is_cell_fixed(const CellInfo &cell) const
@@ -2164,6 +2244,8 @@ PlacerHeapCfg::PlacerHeapCfg(Context *ctx)
     beta = ctx->setting<float>("placerHeap/beta");
     criticalityExponent = ctx->setting<int>("placerHeap/criticalityExponent");
     timingWeight = ctx->setting<int>("placerHeap/timingWeight");
+    congestionSpread = ctx->setting<bool>("placerHeap/congestionSpread", false);
+    congestionWeight = ctx->setting<float>("placerHeap/congestionWeight", 0.5f);
     parallelRefine = ctx->setting<bool>("placerHeap/parallelRefine", false);
     netShareWeight = ctx->setting<float>("placerHeap/netShareWeight", 0);
     disableCtrlSet = ctx->setting<bool>("placerHeap/noCtrlSet", false);

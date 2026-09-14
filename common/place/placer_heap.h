@@ -41,6 +41,13 @@ struct PlacerHeapCfg
     float criticalityExponent;
     float timingWeight;
     bool timing_driven;
+    // Congestion-driven spreading (prototype, off by default): estimate routing
+    // congestion (RUDY) from the current placement and shrink the spreader's
+    // effective bel capacity in hot tiles, so cells spread out of congested
+    // regions the router cannot otherwise route.  congestionWeight scales how
+    // hard hot tiles are penalised.
+    bool congestionSpread;
+    float congestionWeight;
     float solverTolerance;
     bool placeAllAtOnce;
     float netShareWeight;
