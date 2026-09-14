@@ -65,6 +65,12 @@ struct Router2Cfg
     float smooth_percentile;
     float smooth_max_crit;
     int smooth_max_fanout;
+    float smooth_cap_frac;
+    int smooth_min_wires;
+    int smooth_stagnant;
+
+    // Order the route queue by worst absolute slack rather than by criticality.
+    bool slack_order;
 
     // Print additional performance profiling information
     bool perf_profile = false;

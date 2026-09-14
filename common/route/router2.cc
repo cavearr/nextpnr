@@ -77,6 +77,7 @@ struct Router2
         int cx, cy, hpwl;
         int total_route_us = 0;
         float max_crit = 0;
+        delay_t worst_slack = std::numeric_limits<delay_t>::max();
         int fail_count = 0;
     };
 
@@ -1760,6 +1761,119 @@ struct Router2
         return {float(total) / float(v.size()), v.at(idx), v.back(), total};
     }
 
+    // A net's routing as the router's own structures hold it.  This is
+    // everything a trial re-route can disturb, PROVIDED the Arch-level binding
+    // has been released first -- see unbind_arch_routing().
+    struct NetRouteSnapshot
+    {
+        dict<WireId, std::pair<PipId, int>> wires;
+        std::vector<std::vector<std::pair<bool, bool>>> arcs; // routed, pre_routed
+    };
+
+    NetRouteSnapshot snapshot_net(NetInfo *net)
+    {
+        auto &nd = nets.at(net->udata);
+        NetRouteSnapshot s;
+        s.wires = nd.wires;
+        s.arcs.resize(nd.arcs.size());
+        for (size_t u = 0; u < nd.arcs.size(); u++) {
+            s.arcs.at(u).reserve(nd.arcs.at(u).size());
+            for (auto &ad : nd.arcs.at(u))
+                s.arcs.at(u).emplace_back(ad.routed, ad.pre_routed);
+        }
+        return s;
+    }
+
+    void restore_net(NetInfo *net, const NetRouteSnapshot &s)
+    {
+        auto &nd = nets.at(net->udata);
+        // Unwind whatever is bound now.  Ripping the arcs walks each route tree
+        // back to the source; draining any residue afterwards keeps the
+        // per-wire congestion and the per-resource counts falling together,
+        // which is what unbind_pip_internal() exists to do.
+        for (auto usr : net->users.enumerate())
+            for (size_t j = 0; j < nd.arcs.at(usr.index.idx()).size(); j++)
+                ripup_arc(net, usr.index, j);
+        while (!nd.wires.empty()) {
+            WireId w = nd.wires.begin()->first;
+            unbind_pip_internal(nd, store_index<PortRef>(), w);
+        }
+        // Re-bind exactly the pips that were there, each as many times as it
+        // had arcs sharing it, so curr_cong and the resource counts come back
+        // to the values the snapshot was taken at.
+        for (auto &w : s.wires)
+            for (int k = 0; k < w.second.second; k++)
+                bind_pip_internal(nd, store_index<PortRef>(), wire_to_idx.at(w.first), w.second.first);
+        for (size_t u = 0; u < nd.arcs.size(); u++)
+            for (size_t j = 0; j < nd.arcs.at(u).size(); j++) {
+                nd.arcs.at(u).at(j).routed = s.arcs.at(u).at(j).first;
+                nd.arcs.at(u).at(j).pre_routed = s.arcs.at(u).at(j).second;
+            }
+    }
+
+    // How many of this net's pips sit in a tile above the round's target.
+    // Measured against tile_occ as built at the start of the round, so a before
+    // and an after reading of the same net are on the same yardstick.
+    int net_hot_pips(const PerNetData &nd)
+    {
+        int hot = 0;
+        for (auto &w : nd.wires) {
+            PipId pip = w.second.first;
+            if (pip == PipId())
+                continue;
+            Loc pl = ctx->getPipLocation(pip);
+            auto it = tile_occ.find(tile_key(pl.x, pl.y));
+            if (it != tile_occ.end() && it->second > smooth_target)
+                ++hot;
+        }
+        return hot;
+    }
+
+    dict<int, NetRouteSnapshot> snapshot_all()
+    {
+        dict<int, NetRouteSnapshot> s;
+        for (auto net : nets_by_udata)
+            if (net != nullptr)
+                s[net->udata] = snapshot_net(net);
+        return s;
+    }
+
+    void restore_all(const dict<int, NetRouteSnapshot> &s)
+    {
+        for (auto &kv : s)
+            restore_net(nets_by_udata.at(kv.first), kv.second);
+    }
+
+    // Release the Arch-level binding.  bind_and_check_all() runs inside the main
+    // loop, on the first iteration that comes out legal, so by the time this
+    // pass gets to look at anything every wire in the design is bound to its
+    // net in the Arch.  The search itself does not care -- it works off
+    // PerWireData, which was fixed at setup -- but the re-bind at the end does:
+    // bind_and_check_all() rips up and re-binds one net at a time, so a net
+    // whose route moved can collide with a net not yet reached.  Clearing the
+    // lot first removes that ordering hazard.
+    int unbind_arch_routing()
+    {
+        int released = 0;
+        std::vector<WireId> net_wires;
+        for (auto net : nets_by_udata) {
+            if (net == nullptr)
+                continue;
+#ifdef ARCH_ECP5
+            if (net->is_global)
+                continue;
+#endif
+            net_wires.clear();
+            for (auto &w : net->wires)
+                if (w.second.strength <= STRENGTH_STRONG)
+                    net_wires.push_back(w.first);
+            for (auto w : net_wires)
+                ctx->unbindWire(w);
+            released += int(net_wires.size());
+        }
+        return released;
+    }
+
     void smooth_congestion(ThreadContext &st)
     {
         if (cfg.smooth_iters <= 0)
@@ -1769,6 +1883,21 @@ struct Router2
         log_info("Smoothing congestion: %d tiles, mean %.1f, p%.0f %d, max %d, %d pips\n",
                  int(tile_occ.size()), mean0, cfg.smooth_percentile * 100, p0, max0, int(total0));
 
+        // One transaction over the whole pass, on top of the per-net one: if
+        // the Arch will not take the smoothed result, the routing that got here
+        // goes back untouched.
+        auto all_snap = snapshot_all();
+        int arch_fail_before = arch_fail;
+        // The ThreadContext handed to this pass comes from operator(), which
+        // never set its bb -- BoundingBox default-constructs to (-1,-1,-1,-1),
+        // and thread_test_wire() then rejects every wire in the fabric, so the
+        // search cannot expand at all and only arcs whose two ends already meet
+        // can route.  Open it to the whole device, as the single-threaded main
+        // loop does for its own context.
+        st.bb = BoundingBox(0, 0, std::numeric_limits<int>::max(), std::numeric_limits<int>::max());
+        log_info("    released %d arch-bound wires for the duration of the pass\n", unbind_arch_routing());
+
+        int stagnant = 0;
         for (int round = 1; round <= cfg.smooth_iters; round++) {
             build_tile_occupancy();
             auto [mean, p95, mx, total] = occupancy_stats(cfg.smooth_percentile);
@@ -1784,16 +1913,18 @@ struct Router2
                 if (n == nullptr)
                     continue;
                 auto &nd = nets.at(n->udata);
-                // Never touch a clock.  They reach their sinks over dedicated
-                // global resources that a general re-route cannot reconstruct:
-                // ripping up 'clk' and asking route_net for it back fails
+                // Never touch a clock.  It reaches its sinks over dedicated
+                // global resources that a general re-route cannot reconstruct,
+                // so ripping up 'clk' and asking route_net for it back fails
                 // outright --
                 //   ERROR: Failed to route arc 0.0 of net 'clk', from
                 //   BUFGCTRL_X0Y5.O to SLICE_X0Y0.CLKINV_OUT
-                // -- and that is a log_error, so it aborts the whole run.
-                // NetInfo::is_global exists only on some arches (not this
-                // one), and criticality does not flag clocks either, so the
-                // tests below are fanout and the driver's bel type.
+                // The snapshot below would put it back, but the attempt is
+                // certain to fail and costs a full search to find that out.
+                // NetInfo::is_global exists only on some arches (not this one)
+                // and criticality does not flag clocks either, so the test is
+                // the driver's bel type.  That is the whole of it: fanout is
+                // NOT a proxy for this -- see smoothMaxFanout.
                 if (int(n->users.entries()) > cfg.smooth_max_fanout)
                     continue;
                 // Driven by a clock buffer?  Then it reaches its sinks over
@@ -1809,69 +1940,157 @@ struct Router2
                 }
                 if (nd.max_crit >= cfg.smooth_max_crit)
                     continue;
-                // Trivial local nets are not worth the risk.  A net held in a
-                // handful of pips is an intra-slice hop -- a flip-flop output
-                // back into a LUT input in the same slice -- which occupies no
-                // interconnect, so smoothing gains nothing from moving it, and
-                // route_net() cannot rebuild one from scratch once ripped:
+                // Trivial local nets are not worth a search.  A net held in
+                // a handful of pips is an intra-slice hop -- a flip-flop
+                // output back into a LUT input in the same slice -- which
+                // occupies no interconnect, so there is no density to move:
                 //   Failed to route arc 0.0 of net 'core.prbs[19]',
                 //   from SLICE_X1Y0.A5FF_Q to SLICE_X1Y0.A4
-                if (nd.wires.size() < 8)
+                if (int(nd.wires.size()) < cfg.smooth_min_wires)
                     continue;
-                int hot = 0;
-                for (auto &w : nd.wires) {
-                    PipId pip = w.second.first;
-                    if (pip == PipId())
-                        continue;
-                    Loc pl = ctx->getPipLocation(pip);
-                    auto it = tile_occ.find(tile_key(pl.x, pl.y));
-                    if (it != tile_occ.end() && it->second > smooth_target)
-                        ++hot;
-                }
+                int hot = net_hot_pips(nd);
                 if (hot > 0)
                     hot_pips[n->udata] = hot;
             }
             if (hot_pips.empty())
                 break;
 
+            // Why the peak does not move.  The mean comes down and the max
+            // sits still, so say who owns the busiest tile and which filter
+            // put each of its nets out of reach.
+            if (round == 1) {
+                int64_t peak_key = 0;
+                int peak = 0;
+                for (auto &kv : tile_occ)
+                    if (kv.second > peak) {
+                        peak = kv.second;
+                        peak_key = kv.first;
+                    }
+                int n_clock = 0, n_fanout = 0, n_crit = 0, n_small = 0, n_eligible = 0, n_pips = 0;
+                for (auto &n : nets_by_udata) {
+                    if (n == nullptr)
+                        continue;
+                    auto &nd2 = nets.at(n->udata);
+                    int here = 0;
+                    for (auto &w : nd2.wires) {
+                        if (w.second.first == PipId())
+                            continue;
+                        Loc pl = ctx->getPipLocation(w.second.first);
+                        if (tile_key(pl.x, pl.y) == peak_key)
+                            ++here;
+                    }
+                    if (here == 0)
+                        continue;
+                    n_pips += here;
+                    bool clockish = false;
+                    if (n->driver.cell != nullptr && n->driver.cell->bel != BelId()) {
+                        std::string bt = ctx->getBelType(n->driver.cell->bel).str(ctx);
+                        clockish = bt.find("BUFG") != std::string::npos || bt.find("BUFH") != std::string::npos ||
+                                   bt.find("BUFR") != std::string::npos || bt.find("BUFIO") != std::string::npos ||
+                                   bt.find("MMCM") != std::string::npos || bt.find("PLL") != std::string::npos;
+                    }
+                    if (clockish)
+                        n_clock += here;
+                    else if (int(n->users.entries()) > cfg.smooth_max_fanout)
+                        n_fanout += here;
+                    else if (nd2.max_crit >= cfg.smooth_max_crit)
+                        n_crit += here;
+                    else if (int(nd2.wires.size()) < cfg.smooth_min_wires)
+                        n_small += here;
+                    else
+                        n_eligible += here;
+                }
+                log_info("    busiest tile X%dY%d holds %d pips: %d eligible, %d clock-driven, %d high-fanout, "
+                         "%d critical, %d too-small\n",
+                         int(peak_key / 100000), int(peak_key % 100000), n_pips, n_eligible, n_clock, n_fanout,
+                         n_crit, n_small);
+            }
+
             std::vector<std::pair<int, int>> victims; // (hot pips, udata)
             for (auto &kv : hot_pips)
                 victims.emplace_back(kv.second, kv.first);
             std::sort(victims.begin(), victims.end(), std::greater<std::pair<int, int>>());
             // Bounded work per round.
-            size_t cap = std::min<size_t>(victims.size(), std::max<size_t>(64, victims.size() / 4));
+            size_t cap = std::min<size_t>(
+                    victims.size(), std::max<size_t>(64, size_t(victims.size() * cfg.smooth_cap_frac)));
 
+            // Each net below is a trial: ripped up, re-routed against the
+            // density cost, and kept only if it comes back no worse.  A net the
+            // search cannot rebuild reports that with log_error(), which prints
+            // an ERROR line before it throws, so say in advance what those
+            // lines mean -- they are moves this pass declined and undid, not
+            // failures of the run.
+            log_info("    round %d: trying %d nets; any ERROR below is a declined move, and is undone\n", round,
+                     int(cap));
             smoothing_active = true;
-            int rerouted = 0;
+            int rerouted = 0, rejected = 0, unroutable = 0;
             for (size_t i = 0; i < cap; i++) {
                 NetInfo *net = nets_by_udata.at(victims.at(i).second);
                 if (net == nullptr)
                     continue;
                 auto &nd = nets.at(net->udata);
+                int hot_before = net_hot_pips(nd);
+                // Take the snapshot before touching anything.  A re-route that
+                // fails, or that comes back no better, is then a move this pass
+                // declines rather than damage it has to live with.
+                NetRouteSnapshot snap = snapshot_net(net);
                 // Force the rip-up.  route_net() keeps any arc that is already
                 // legally routed, so without this it would look at a legal net
                 // and do nothing -- the density cost would never be consulted.
                 for (auto usr : net->users.enumerate()) {
                     auto &ad = nd.arcs.at(usr.index.idx());
                     for (size_t j = 0; j < ad.size(); j++) {
-                        // Leave arcs that stay inside one tile alone.  They
-                        // occupy no interconnect, so smoothing has nothing to
-                        // gain from them, and route_net() cannot rebuild one
-                        // once ripped -- a flip-flop output back into a LUT
-                        // input in the same slice is not a path the general
-                        // search can find:
-                        //   Failed to route arc 0.0 of net 'core.prbs[19]',
-                        //   from SLICE_X1Y0.A5FF_Q to SLICE_X1Y0.A4
-                        // and that is a log_error, so it takes the run with
-                        // it.  A degenerate bounding box is exactly this case.
-                        const auto &abb = ad.at(j).bb;
-                        if (abb.x0 == abb.x1 && abb.y0 == abb.y1)
+                        // An arc the placer pre-bound is allowed to break the
+                        // normal availability rules (see bind_and_check), and
+                        // ripup_arc() drops that privilege on the way out -- as
+                        // its own comment says, the routing may then no longer
+                        // be the same as before.  Leave those alone.
+                        if (ad.at(j).pre_routed)
+                            continue;
+                        WireId sink = ad.at(j).sink_wire;
+                        if (nd.src_wire == WireId() || sink == WireId())
+                            continue;
+                        // Leave arcs that stay inside one tile alone: a
+                        // flip-flop output back into a LUT input in the same
+                        // slice occupies no interconnect, so there is nothing
+                        // for smoothing to move, and the general search cannot
+                        // rebuild that hop once it is ripped.  ad.bb does not
+                        // identify them -- getRouteBoundingBox() adds a search
+                        // margin, so even X79Y221 to X79Y221 comes back as a
+                        // box with area -- but PerWireData carries the tile
+                        // each wire is in, which answers it exactly.
+                        const auto &swd = wire_data(nd.src_wire);
+                        const auto &dwd = wire_data(sink);
+                        if (swd.x == dwd.x && swd.y == dwd.y)
                             continue;
                         ripup_arc(net, usr.index, j);
                     }
                 }
-                if (route_net(st, net, false))
-                    ++rerouted;
+
+                bool ok;
+                try {
+                    ok = route_net(st, net, false);
+                } catch (log_execution_error_exception &) {
+                    // An arc the search cannot rebuild is reported with
+                    // log_error(), which throws rather than returning.  Nothing
+                    // else hangs off that throw -- log_error_atexit is never
+                    // installed -- so the ERROR line it printed is the only
+                    // trace, and the move is simply refused.  The search's
+                    // visit marks are cleared before st is used again.
+                    reset_wires(st);
+                    ok = false;
+                }
+                if (!ok) {
+                    restore_net(net, snap);
+                    ++unroutable;
+                    continue;
+                }
+                if (net_hot_pips(nd) > hot_before) {
+                    restore_net(net, snap);
+                    ++rejected;
+                    continue;
+                }
+                ++rerouted;
             }
             smoothing_active = false;
 
@@ -1891,13 +2110,33 @@ struct Router2
 
             build_tile_occupancy();
             auto [m2, p2, x2, t2] = occupancy_stats(cfg.smooth_percentile);
-            log_info("    round %d: rerouted %d nets, mean %.1f, p%.0f %d, max %d, %d pips%s\n", round, rerouted,
-                     m2, cfg.smooth_percentile * 100, p2, x2, int(t2),
+            log_info("    round %d: kept %d nets (%d rejected, %d unroutable), mean %.1f, p%.0f %d, max %d, "
+                     "%d pips%s\n",
+                     round, rerouted, rejected, unroutable, m2, cfg.smooth_percentile * 100, p2, x2, int(t2),
                      overused_wires ? " (OVERUSE REMAINS)" : "");
-            if (p2 >= p95)
-                break; // no longer improving
+            if (p2 >= p95) {
+                if (++stagnant > cfg.smooth_stagnant)
+                    break; // no longer improving
+            } else {
+                stagnant = 0;
+            }
         }
         smooth_target = 0;
+
+        // Put the Arch-level binding back.  bind_and_check() rips up any arc it
+        // cannot bind and records the net as failed, so a refusal here leaves
+        // the routing incomplete with no loop left to repair it -- revert the
+        // whole pass instead.
+        failed_nets.clear();
+        if (!bind_and_check_all() || !failed_nets.empty()) {
+            log_info("    smoothing: the arch would not bind the smoothed result, reverting\n");
+            restore_all(all_snap);
+            failed_nets.clear();
+            arch_fail = arch_fail_before;
+            unbind_arch_routing();
+            if (!bind_and_check_all())
+                log_error("Internal error: the pre-smoothing routing no longer binds.\n");
+        }
     }
 
     void operator()()
@@ -1936,13 +2175,36 @@ struct Router2
                     NetInfo *ni = nets_by_udata.at(n);
                     auto &net = nets.at(n);
                     net.max_crit = 0;
+                    net.worst_slack = std::numeric_limits<delay_t>::max();
                     for (auto &usr : ni->users) {
-                        float c = tmg.get_criticality(CellPortKey(usr));
-                        net.max_crit = std::max(net.max_crit, c);
+                        CellPortKey key(usr);
+                        net.max_crit = std::max(net.max_crit, tmg.get_criticality(key));
+                        net.worst_slack = std::min(net.worst_slack, delay_t(tmg.get_setup_slack(key)));
                     }
                 }
-                std::stable_sort(route_queue.begin(), route_queue.end(),
-                                 [&](int na, int nb) { return nets.at(na).max_crit > nets.at(nb).max_crit; });
+                if (cfg.slack_order) {
+                    // Worst absolute slack first, rather than highest
+                    // criticality.  Criticality is normalised within a clock
+                    // domain, so in a design with several -- 100 MHz sys_clk,
+                    // 125 MHz ethernet, 200 MHz idelay, 12 MHz SGMII -- a net
+                    // at 0.9 in the slowest domain outranks one at 0.85 in the
+                    // domain that is actually failing, and gets first pick of
+                    // the routing resource it does not need.  Slack in
+                    // picoseconds is comparable across domains; criticality is
+                    // not.
+                    //
+                    // This ordering is only as good as the delay estimate
+                    // behind it, and on the first iteration nothing is routed
+                    // yet, so every number here comes from predictDelay().
+                    // That is why this is worth doing now: see
+                    // docs/measured-delay-matrix.md.
+                    std::stable_sort(route_queue.begin(), route_queue.end(), [&](int na, int nb) {
+                        return nets.at(na).worst_slack < nets.at(nb).worst_slack;
+                    });
+                } else {
+                    std::stable_sort(route_queue.begin(), route_queue.end(),
+                                     [&](int na, int nb) { return nets.at(na).max_crit > nets.at(nb).max_crit; });
+                }
             }
 
             do_route();
@@ -2070,6 +2332,11 @@ Router2Cfg::Router2Cfg(Context *ctx)
         curr_cong_mult = ctx->setting<float>("router2/currCongWeightMult", 2.0f);
         estimate_weight = ctx->setting<float>("router2/estimateWeight", 1.25f);
     }
+    {
+        // Order the route queue by worst absolute slack instead of by
+        // criticality.  See the comment at the sort site.
+        slack_order = ctx->setting<bool>("router2/slackOrder", false);
+    }
     // Smoothing is opt-in: --router2-smooth-iters N, or router2/smoothIters.
     smooth_iters = ctx->setting<int>("router2/smoothIters", 0);
     smooth_weight = ctx->setting<float>("router2/smoothWeight", 1.0f);
@@ -2080,12 +2347,30 @@ Router2Cfg::Router2Cfg(Context *ctx)
     // where the timing-driven router put them, and moving them is how a
     // smoothing pass makes timing worse.
     smooth_max_crit = ctx->setting<float>("router2/smoothMaxCrit", 0.8f);
-    // Fanout cap.  A high-fanout net is a clock or a reset distributed over
-    // dedicated resources; route_net() cannot rebuild those from scratch and
-    // log_errors if asked, which aborts the whole run.  is_global is not set
-    // by every uarch -- the xilinx one does not -- so fanout is the portable
-    // way to recognise them.
-    smooth_max_fanout = ctx->setting<int>("router2/smoothMaxFanout", 32);
+    // Fanout cap, off by default.  It used to be 32, on the theory that a
+    // high-fanout net is a clock or a reset on dedicated resources.  That is
+    // wrong for this flow: the only global buffer meaningfully supported is
+    // CLKG, which is on dedicated routing and so does not appear in the tile
+    // occupancy at all, and the driver-bel test below catches it directly.
+    // Everything else with a large fanout is an ordinary signal on ordinary
+    // interconnect -- and it is what the crowded tiles are made of.  On the
+    // vc707 LiteX design the busiest tile holds 531 pips, of which a cap of 64
+    // put 412 out of reach and left only 79 eligible; that is why the mean came
+    // down and the peak never moved.  Uncapped, the same tile offers 491, and
+    // the peak moves for the first time.
+    smooth_max_fanout = ctx->setting<int>("router2/smoothMaxFanout", std::numeric_limits<int>::max());
+    // How much of the candidate list to spend per round.  A quarter keeps a
+    // round cheap; 1.0 takes every candidate, which is what "aggressive" means
+    // here -- the selection, not the cost weight, is what bounds this pass.
+    smooth_cap_frac = ctx->setting<float>("router2/smoothCapFrac", 0.25f);
+    // Nets held in fewer wires than this are skipped as not worth a search.
+    // The per-arc intra-tile test is what actually keeps unroutable hops out,
+    // so this is a cost filter, not a safety one, and can go down to 2.
+    smooth_min_wires = ctx->setting<int>("router2/smoothMinWires", 8);
+    // How many rounds that fail to lower the percentile to tolerate before
+    // giving up.  Redistribution can need a round that goes sideways before it
+    // finds the one that helps.
+    smooth_stagnant = ctx->setting<int>("router2/smoothStagnant", 0);
     perf_profile = ctx->setting<bool>("router2/perfProfile", false);
     if (ctx->settings.count(ctx->id("router2/heatmap")))
         heatmap = ctx->settings.at(ctx->id("router2/heatmap")).as_string();

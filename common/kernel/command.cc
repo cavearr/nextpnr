@@ -398,6 +398,20 @@ po::options_description CommandHandler::getGeneralOptions()
                           "post-routing congestion smoothing rounds (0 = off, the default)");
     general.add_options()("router2-smooth-weight", po::value<float>(),
                           "how hard smoothing pushes traffic out of crowded tiles (default 1.0)");
+    general.add_options()("router2-smooth-percentile", po::value<float>(),
+                          "tile occupancy percentile smoothing treats as hot (default 0.95)");
+    general.add_options()("router2-smooth-max-crit", po::value<float>(),
+                          "smoothing leaves nets at or above this criticality alone (default 0.8)");
+    general.add_options()("router2-smooth-max-fanout", po::value<int>(),
+                          "smoothing leaves nets with more sinks than this alone (default 32)");
+    general.add_options()("router2-smooth-cap", po::value<float>(),
+                          "fraction of smoothing candidates to try per round (default 0.25, 1.0 = all)");
+    general.add_options()("router2-smooth-min-wires", po::value<int>(),
+                          "smoothing skips nets held in fewer wires than this (default 8)");
+    general.add_options()("router2-smooth-stagnant", po::value<int>(),
+                          "non-improving smoothing rounds to tolerate before stopping (default 0)");
+    general.add_options()("router2-slack-order",
+                          "order the router queue by worst absolute slack rather than by criticality");
 
     general.add_options()("report", po::value<std::string>(),
                           "write timing and utilization report in JSON format to file");
@@ -534,7 +548,21 @@ void CommandHandler::setupContext(Context *ctx)
     if (vm.count("router2-smooth-iters"))
         ctx->settings[ctx->id("router2/smoothIters")] = vm["router2-smooth-iters"].as<int>();
     if (vm.count("router2-smooth-weight"))
-        ctx->settings[ctx->id("router2/smoothWeight")] = vm["router2-smooth-weight"].as<float>();
+        ctx->settings[ctx->id("router2/smoothWeight")] = std::to_string(vm["router2-smooth-weight"].as<float>());
+    if (vm.count("router2-smooth-percentile"))
+        ctx->settings[ctx->id("router2/smoothPercentile")] = std::to_string(vm["router2-smooth-percentile"].as<float>());
+    if (vm.count("router2-smooth-max-crit"))
+        ctx->settings[ctx->id("router2/smoothMaxCrit")] = std::to_string(vm["router2-smooth-max-crit"].as<float>());
+    if (vm.count("router2-smooth-max-fanout"))
+        ctx->settings[ctx->id("router2/smoothMaxFanout")] = vm["router2-smooth-max-fanout"].as<int>();
+    if (vm.count("router2-smooth-cap"))
+        ctx->settings[ctx->id("router2/smoothCapFrac")] = std::to_string(vm["router2-smooth-cap"].as<float>());
+    if (vm.count("router2-smooth-min-wires"))
+        ctx->settings[ctx->id("router2/smoothMinWires")] = vm["router2-smooth-min-wires"].as<int>();
+    if (vm.count("router2-smooth-stagnant"))
+        ctx->settings[ctx->id("router2/smoothStagnant")] = vm["router2-smooth-stagnant"].as<int>();
+    if (vm.count("router2-slack-order"))
+        ctx->settings[ctx->id("router2/slackOrder")] = true;
 
     if (vm.count("static-dump-density"))
         ctx->settings[ctx->id("static/dump_density")] = true;
