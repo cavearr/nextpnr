@@ -278,40 +278,80 @@ void XilinxImpl::build_delay_matrix()
         log_info("Delay matrix: interpolated %d structural holes.\n", holes);
     }
 
-    // Put the out-of-window fallback on the same scale as the measurements, so
-    // the estimate stays continuous at the window edge instead of stepping
-    // between two unit systems.
-    {
-        double ratio_sum = 0;
-        int ratio_n = 0;
-        for (int y = -dm_window; y <= dm_window; y++)
-            for (int x = -dm_window; x <= dm_window; x++) {
-                if (hits.at(dm_index(x, y)) == 0)
-                    continue;
-                int ax = std::abs(x), ay = std::abs(y);
-                double formula = 30.0 * std::min(ax, 18) + 10.0 * std::max(ax - 18, 0) + 60.0 * std::min(ay, 6) +
-                                 20.0 * std::max(ay - 6, 0) + 300.0;
-                formula = formula * 1.5;
-                if (formula <= 0)
-                    continue;
-                ratio_sum += double(dm_delay.at(dm_index(x, y))) / formula;
-                ++ratio_n;
-            }
-        dm_formula_scale = ratio_n > 0 ? float(ratio_sum / ratio_n) : 1.0f;
-        log_info("Delay matrix: out-of-window formula scaled by %.3f to match.\n", dm_formula_scale);
-    }
     dm_valid = true;
+    compute_edge_rates();
     if (!cache.empty())
         save_delay_matrix(cache);
 }
 
-// Look the offset up.  Returns -1 when the offset is outside the measured
-// window or was never reached, and the caller falls back to the formula.
+// The marginal delay per tile at the window edge, one rate per axis, averaged
+// over the outer band of the measured table.  This is what long connections
+// actually cost per tile out there -- on this fabric only about 8 ps, because
+// the long lines make distant tiles cheap -- and it is derived from the
+// measurements, not from the old hand-tuned formula, whose out-of-window slope
+// was wrong by 3x.  Recomputed identically whether the matrix was built or
+// loaded from cache, so the cache round-trip cannot drop it (the bug that made
+// a cached run and a --delay-matrix=build run price long connections
+// differently, and made a proof run disagree with CI on the same netlist).
+void XilinxImpl::compute_edge_rates()
+{
+    const int band = 4;
+    if (dm_window <= band) {
+        dm_rate_x = dm_rate_y = 0.0f;
+        return;
+    }
+    double sx = 0, sy = 0;
+    int nx = 0, ny = 0;
+    for (int y = -dm_window; y <= dm_window; y++) {
+        delay_t outer = dm_delay.at(dm_index(dm_window, y));
+        delay_t inner = dm_delay.at(dm_index(dm_window - band, y));
+        if (outer >= 0 && inner >= 0) {
+            sx += double(outer - inner) / band;
+            ++nx;
+        }
+        delay_t outer_n = dm_delay.at(dm_index(-dm_window, y));
+        delay_t inner_n = dm_delay.at(dm_index(-(dm_window - band), y));
+        if (outer_n >= 0 && inner_n >= 0) {
+            sx += double(outer_n - inner_n) / band;
+            ++nx;
+        }
+    }
+    for (int x = -dm_window; x <= dm_window; x++) {
+        delay_t outer = dm_delay.at(dm_index(x, dm_window));
+        delay_t inner = dm_delay.at(dm_index(x, dm_window - band));
+        if (outer >= 0 && inner >= 0) {
+            sy += double(outer - inner) / band;
+            ++ny;
+        }
+        delay_t outer_n = dm_delay.at(dm_index(x, -dm_window));
+        delay_t inner_n = dm_delay.at(dm_index(x, -(dm_window - band)));
+        if (outer_n >= 0 && inner_n >= 0) {
+            sy += double(outer_n - inner_n) / band;
+            ++ny;
+        }
+    }
+    // Never let the extrapolation slope go non-positive: a further tile must
+    // not look free or cheaper.  Floor at a small positive rate.
+    dm_rate_x = nx ? std::max(1.0f, float(sx / nx)) : 8.0f;
+    dm_rate_y = ny ? std::max(1.0f, float(sy / ny)) : 8.0f;
+    log_info("Delay matrix: out-of-window rates %.1f ps/tile (x), %.1f ps/tile (y).\n", dm_rate_x, dm_rate_y);
+}
+
+// Look the offset up.  In window: the measured value.  Out of window: the
+// measured edge value plus the measured marginal rate times the overshoot, per
+// axis -- no formula.  Returns -1 only when there is no matrix at all.
 delay_t XilinxImpl::delay_matrix_lookup(int dx, int dy) const
 {
-    if (!dm_valid || std::abs(dx) > dm_window || std::abs(dy) > dm_window)
+    if (!dm_valid)
         return -1;
-    return dm_delay.at(dm_index(dx, dy));
+    int ex = std::max(-dm_window, std::min(dm_window, dx));
+    int ey = std::max(-dm_window, std::min(dm_window, dy));
+    delay_t base = dm_delay.at(dm_index(ex, ey));
+    if (base < 0)
+        return -1; // an unmeasured, uninterpolated hole (should not happen post-fill)
+    int over_x = std::abs(dx) - std::abs(ex);
+    int over_y = std::abs(dy) - std::abs(ey);
+    return base + delay_t(over_x * dm_rate_x + over_y * dm_rate_y);
 }
 
 bool XilinxImpl::load_delay_matrix(const std::string &path)
@@ -336,6 +376,7 @@ bool XilinxImpl::load_delay_matrix(const std::string &path)
     dm_window = window;
     dm_delay = std::move(vals);
     dm_valid = true;
+    compute_edge_rates();
     log_info("Delay matrix: loaded %d offsets from %s.\n", side * side, path.c_str());
     return true;
 }

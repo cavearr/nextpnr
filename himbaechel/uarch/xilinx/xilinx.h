@@ -219,7 +219,12 @@ struct XilinxImpl : HimbaechelAPI
     int dm_window = 24;
     int dm_max_explore = 4000000;
     bool dm_valid = false;
-    float dm_formula_scale = 1.0f;
+    // Out-of-window connections are extrapolated from the measured window
+    // edge at these marginal rates (ps per tile), derived from dm_delay
+    // itself -- so a loaded matrix and a freshly built one price long
+    // connections identically, and there is no arbitrary formula left in
+    // the path.
+    float dm_rate_x = 0.0f, dm_rate_y = 0.0f;
     size_t dm_index(int dx, int dy) const
     {
         return size_t((dy + dm_window) * (2 * dm_window + 1) + (dx + dm_window));
@@ -228,6 +233,7 @@ struct XilinxImpl : HimbaechelAPI
     std::vector<std::pair<WireId, Loc>> pick_delay_sources(int count) const;
     void build_delay_matrix();
     delay_t delay_matrix_lookup(int dx, int dy) const;
+    void compute_edge_rates();
     bool load_delay_matrix(const std::string &path);
     void save_delay_matrix(const std::string &path) const;
 

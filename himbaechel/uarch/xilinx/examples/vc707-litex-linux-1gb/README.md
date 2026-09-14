@@ -36,18 +36,29 @@ not.  Its DDR controller domain, `main_crgddr_clkout_buf0`, is constrained at
 routes, assembles and configures with DONE asserted, and then miscomputes on
 hardware.
 
-Two changes closed it, and this entry exists to keep them closed:
+A measured interconnect delay model closes it, and this entry exists to keep
+it closed:
 
-    baseline (tuned delay formula, timingweight 60)      75.59 MHz  FAIL
-    + measured delay matrix                             89.39 MHz  FAIL
-    + --placer-heap-timingweight 100                    106.50 MHz  PASS
+    baseline (tuned delay formula, timingweight 60)              75.59 MHz  FAIL
+    + measured delay matrix, timingweight 100                  103.08 MHz  PASS
 
 so the entry runs with `-o delay-matrix=build --placer-heap-timingweight 100`
-rather than the gate's default placer flags.  See
-`docs/measured-delay-matrix.md` in xc7-bitstream-tools for why the tuned
-formula was wrong (it is separable, so it charges a diagonal the sum of both
-legs, and linear, so it charges two tiles twice what it charges one; the
-fabric's bent wires and quads do neither).
+rather than the gate's default placer flags.  The router CONVERGES here
+(overuse 36127 -> 0 in 29 iterations); with the old separable formula it
+DIVERGES on this netlist -- overuse floors around 5000 and climbs -- because
+that formula charges a diagonal the sum of both legs and two tiles twice one
+tile, when the fabric's bent wires and quads do neither.  See
+`docs/measured-delay-matrix.md` in xc7-bitstream-tools.
+
+The out-of-window pricing matters most here, and it is where an earlier version
+went wrong: it must be measured, not a scaled formula.  The measured marginal
+rate is anisotropic -- about 7 ps/tile horizontally but 12.8 vertically -- and
+the DDR datapath is vertical, so mispricing the vertical rate lets the placer
+spread it and the router cannot recover.  (An earlier build fitted a single
+scale to the formula and, through a cache round-trip that dropped it, once
+reported 106.50 -- higher, but an artifact of overpricing every long
+connection threefold, and not reproducible under the flags this entry
+actually runs.)
 
 A second, independent route to the same result is
 `--placer-heap-timingweight 60 --router2-slack-order --router2-tmg-ripup`,

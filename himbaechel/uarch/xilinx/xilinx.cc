@@ -1045,15 +1045,13 @@ delay_t XilinxImpl::estimateDelay(WireId src, WireId dst) const
     delay_t base;
     delay_t measured = delay_matrix_lookup(dx - sx, dy - sy);
     if (measured >= 0) {
-        base = measured;
+        base = measured; // in or out of window -- extrapolated when out
     } else {
-        // Tuned delay formula ported from nextpnr-xilinx arch.cc
+        // No measured matrix at all: the tuned formula from nextpnr-xilinx.
         int dist_x = std::abs(dx - sx), dist_y = std::abs(dy - sy);
         base = 30 * std::min(dist_x, 18) + 10 * std::max(dist_x - 18, 0) + 60 * std::min(dist_y, 6) +
                20 * std::max(dist_y - 6, 0) + 300;
         base = (base * 3) / 2; // xc7
-        if (dm_valid)
-            base = delay_t(base * dm_formula_scale); // same scale as the table
     }
     if (fnd_snk != sink_locs.end())
         base += 1000;
@@ -1091,14 +1089,11 @@ delay_t XilinxImpl::predictDelay(BelId src_bel, IdString src_pin, BelId dst_bel,
     }
     delay_t measured = delay_matrix_lookup(dx - sx, dy - sy);
     if (measured >= 0)
-        return measured;
+        return measured; // in or out of window -- extrapolated when out
     int dist_x = std::abs(dx - sx), dist_y = std::abs(dy - sy);
     delay_t base = 30 * std::min(dist_x, 18) + 10 * std::max(dist_x - 18, 0) + 60 * std::min(dist_y, 6) +
                    20 * std::max(dist_y - 6, 0) + 300;
-    base = (base * 3) / 2; // xc7
-    if (dm_valid)
-        base = delay_t(base * dm_formula_scale);
-    return base;
+    return (base * 3) / 2; // xc7 (no measured matrix)
 }
 
 BoundingBox XilinxImpl::getRouteBoundingBox(WireId src, WireId dst) const
