@@ -214,6 +214,23 @@ struct XilinxImpl : HimbaechelAPI
     bool is_general_routing(WireId wire) const;
     void find_source_sink_locs();
 
+    // Measured interconnect delay by tile offset; see delay_matrix.cc.
+    std::vector<delay_t> dm_delay;
+    int dm_window = 24;
+    int dm_max_explore = 4000000;
+    bool dm_valid = false;
+    float dm_formula_scale = 1.0f;
+    size_t dm_index(int dx, int dy) const
+    {
+        return size_t((dy + dm_window) * (2 * dm_window + 1) + (dx + dm_window));
+    }
+    int measure_from(WireId src, int sx, int sy, std::vector<delay_t> &out) const;
+    std::vector<std::pair<WireId, Loc>> pick_delay_sources(int count) const;
+    void build_delay_matrix();
+    delay_t delay_matrix_lookup(int dx, int dy) const;
+    bool load_delay_matrix(const std::string &path);
+    void save_delay_matrix(const std::string &path) const;
+
     delay_t predictDelay(BelId src_bel, IdString src_pin, BelId dst_bel, IdString dst_pin) const override;
     delay_t estimateDelay(WireId src, WireId dst) const override;
     BoundingBox getRouteBoundingBox(WireId src, WireId dst) const override;

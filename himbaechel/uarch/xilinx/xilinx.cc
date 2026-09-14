@@ -73,6 +73,9 @@ po::options_description XilinxImpl::getUArchOptions()
     specific.add_options()("xdc", po::value<std::string>(), "name of constraints file");
     specific.add_options()("placement", po::value<std::string>(),
                            "placement dump (JSON: cell -> tile/site/bel/type) for external LVS");
+    specific.add_options()("delay-matrix", po::value<std::string>(),
+                           "measure interconnect delay by tile offset instead of using the tuned formula; "
+                           "the value is a cache file, built if absent (use 'build' for no cache)");
     return specific;
 }
 
@@ -542,6 +545,15 @@ void XilinxImpl::apply_loc_constraints()
 
 void XilinxImpl::prePlace()
 {
+    // Before placement, so the measured table reaches the placer (through
+    // predictDelay and criticality) as well as the router's A* guidance.
+    const ArchArgs &dm_args = ctx->args;
+    if (dm_args.options.count("delay-matrix")) {
+        std::string f = dm_args.options["delay-matrix"].as<std::string>();
+        if (f != "build")
+            ctx->settings[ctx->id("xilinx/delayMatrixFile")] = f;
+        build_delay_matrix();
+    }
     apply_loc_constraints();
     assign_cell_tags();
     index_control_sets();
@@ -1027,11 +1039,22 @@ delay_t XilinxImpl::estimateDelay(WireId src, WireId dst) const
         }
     }
 
-    // Tuned delay formula ported from nextpnr-xilinx arch.cc
-    int dist_x = std::abs(dx - sx), dist_y = std::abs(dy - sy);
-    delay_t base = 30 * std::min(dist_x, 18) + 10 * std::max(dist_x - 18, 0) + 60 * std::min(dist_y, 6) +
-                   20 * std::max(dist_y - 6, 0) + 300;
-    base = (base * 3) / 2; // xc7
+    // A measured offset, when we have one, in place of the tuned formula: it
+    // knows that a diagonal is one hop and that one tile and two tiles cost
+    // the same hop, neither of which a separable linear formula can express.
+    delay_t base;
+    delay_t measured = delay_matrix_lookup(dx - sx, dy - sy);
+    if (measured >= 0) {
+        base = measured;
+    } else {
+        // Tuned delay formula ported from nextpnr-xilinx arch.cc
+        int dist_x = std::abs(dx - sx), dist_y = std::abs(dy - sy);
+        base = 30 * std::min(dist_x, 18) + 10 * std::max(dist_x - 18, 0) + 60 * std::min(dist_y, 6) +
+               20 * std::max(dist_y - 6, 0) + 300;
+        base = (base * 3) / 2; // xc7
+        if (dm_valid)
+            base = delay_t(base * dm_formula_scale); // same scale as the table
+    }
     if (fnd_snk != sink_locs.end())
         base += 1000;
     if (src_type == id_NODE_PINFEED && dx == sx && dy == sy)
@@ -1066,10 +1089,16 @@ delay_t XilinxImpl::predictDelay(BelId src_bel, IdString src_pin, BelId dst_bel,
         else
             return 150;
     }
+    delay_t measured = delay_matrix_lookup(dx - sx, dy - sy);
+    if (measured >= 0)
+        return measured;
     int dist_x = std::abs(dx - sx), dist_y = std::abs(dy - sy);
     delay_t base = 30 * std::min(dist_x, 18) + 10 * std::max(dist_x - 18, 0) + 60 * std::min(dist_y, 6) +
                    20 * std::max(dist_y - 6, 0) + 300;
-    return (base * 3) / 2; // xc7
+    base = (base * 3) / 2; // xc7
+    if (dm_valid)
+        base = delay_t(base * dm_formula_scale);
+    return base;
 }
 
 BoundingBox XilinxImpl::getRouteBoundingBox(WireId src, WireId dst) const

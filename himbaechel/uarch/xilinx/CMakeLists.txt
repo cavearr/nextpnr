@@ -1,6 +1,7 @@
 set(SOURCES
     cells.cc
     constids.inc
+    delay_matrix.cc
     extra_data.h
     fasm.cc
     mmcm_tables.cc
