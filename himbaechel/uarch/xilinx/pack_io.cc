@@ -1299,9 +1299,25 @@ void XC7Packer::constrain_gt(CellInfo *pad_cell, CellInfo *gt_cell)
         log_error("Pad cell %s has not been placed\n", pad_cell->name.c_str(ctx));
 
     if (gt_cell->bel != BelId()) {
-        if (gt_cell->bel.tile != pad_bel.tile)
+        if (gt_cell->bel.tile != pad_bel.tile) {
+            // A different tile is not automatically a conflict.  A reference
+            // clock pad feeds an IBUFDS_GTE2 whose output is distributed to
+            // transceivers across the quad, so sgmii_refclk_p legitimately
+            // sits in one tile while the GTXE2_CHANNEL it clocks sits in
+            // another -- and by the time this pad is reached, that channel has
+            // already been placed by its own data pads.  Only complain if this
+            // pad's tile actually offers a site for this cell type, which is
+            // the case where the two placements really do disagree.  The
+            // unplaced path below already reasons this way.
+            if (get_gt_site(pad_bel, gt_cell->type) == SiteIndex()) {
+                log_info("    '%s' takes its reference clock from pad '%s' in another tile; "
+                         "keeping its existing placement\n",
+                         gt_cell->name.c_str(ctx), pad_cell->name.c_str(ctx));
+                return;
+            }
             log_error("Location of pad %s on tile %d conflicts with previous placement of %s on tile %d\n",
                       pad_cell->name.c_str(ctx), pad_bel.tile, gt_cell->name.c_str(ctx), gt_cell->bel.tile);
+        }
         return;
     }
     SiteIndex gt_site = get_gt_site(pad_bel, gt_cell->type);
