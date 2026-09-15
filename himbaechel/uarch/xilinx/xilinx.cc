@@ -77,8 +77,11 @@ po::options_description XilinxImpl::getUArchOptions()
                            "interconnect delay model: on by default (measured per tile offset); 'off' uses the "
                            "tuned formula; a path caches the table there; 'build' rebuilds it fresh (the default)");
     specific.add_options()("hold-fix", po::value<std::string>()->implicit_value(""),
-                           "after routing, insert feedthrough LUT buffers to fix hold-time (min-delay) violations; "
-                           "optional value sets the max number of passes (default 8)");
+                           "after routing, fix hold-time (min-delay) violations: small deficits by a routing "
+                           "detour, larger ones by a feedthrough LUT; optional value sets the max passes (default 8)");
+    specific.add_options()("hold-detour-max", po::value<double>(),
+                           "hold deficit (ns) up to which a routing detour is used instead of a feedthrough LUT "
+                           "(default 0.5)");
     return specific;
 }
 
