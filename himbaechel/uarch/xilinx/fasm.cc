@@ -1200,8 +1200,10 @@ struct FasmBackend
             // of a left-hand HP bank carries a bank-level glue bit.  The
             // legacy flow's working VC707 bitstreams set it; ours did not, and
             // examples/vc707-telegraph's golden Vivado build sets it on every
-            // driven LIOB18 output half.
-            if (is_liob18 && !is_diff && !is_sing)
+            // driven LIOB18 output half.  SING tiles are included: their own
+            // segbits_liob18_sing.db defines IOB_Y{0,1}.OBUF_HP_BANK_GLUE, so
+            // the earlier !is_sing skip dropped a real, expressible bit.
+            if (is_liob18 && !is_diff)
                 write_bit("OBUF_HP_BANK_GLUE");
         }
 
@@ -2265,7 +2267,11 @@ struct FasmBackend
         bool no_count = false, edge = false;
         double divide = float_or_default(
                 ci, name + ((name == "CLKFBOUT") ? "_MULT_F" : (name == "CLKOUT0" ? "_DIVIDE_F" : "_DIVIDE")), 1);
-        double phase = float_or_default(ci, name + "_PHASE", 1);
+        // Xilinx's default for every *_PHASE attribute is 0.0 degrees, not 1;
+        // the PLL writer above was corrected, this is the matching MMCM fix
+        // (nextpnr-xilinx#191).  An unset CLKOUT*_PHASE otherwise shifts the
+        // clock by an eighth of a VCO period.
+        double phase = float_or_default(ci, name + "_PHASE", 0);
         if (divide <= 1) {
             no_count = true;
         } else {
