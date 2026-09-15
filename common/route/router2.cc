@@ -566,8 +566,20 @@ struct Router2
         WireId src = nets.at(net->udata).src_wire;
         WireId cursor = ad.sink_wire;
         while (cursor != src) {
-            size_t wire_idx = wire_to_idx.at(cursor);
+            // Mirror check_arc_routing's termination: the routed tree can end
+            // at a wire that is not src_wire -- a wire with no driving pip
+            // (a route root, or a GND/VCC constant source for a constant net),
+            // for which check_arc_routing still reports the arc as routed.
+            // Without these guards getPipSrcWire(PipId()) indexes tile -1 and
+            // asserts, which is why re-routing an already-routed design (a
+            // second router2() invocation, or a loaded pre-routed design) fell
+            // over here.
+            if (!nd.wires.count(cursor))
+                break;
             PipId pip = nd.wires.at(cursor).first;
+            if (pip == PipId())
+                break;
+            size_t wire_idx = wire_to_idx.at(cursor);
             bind_pip_internal(nd, usr, wire_idx, pip);
             cursor = ctx->getPipSrcWire(pip);
         }
