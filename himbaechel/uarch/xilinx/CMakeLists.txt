@@ -4,6 +4,7 @@ set(SOURCES
     delay_matrix.cc
     extra_data.h
     fasm.cc
+    hold_fix.cc
     mmcm_tables.cc
     pack_carry.cc
     pack.cc

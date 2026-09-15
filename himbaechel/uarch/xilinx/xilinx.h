@@ -175,6 +175,7 @@ struct XilinxImpl : HimbaechelAPI
 
     void fixup_placement();
     void fixup_routing();
+    void fixup_hold();
     void route_clocks();
 
     virtual std::string getDefaultRouter() const override { return "router2"; };

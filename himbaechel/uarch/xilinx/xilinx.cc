@@ -76,6 +76,9 @@ po::options_description XilinxImpl::getUArchOptions()
     specific.add_options()("delay-matrix", po::value<std::string>(),
                            "interconnect delay model: on by default (measured per tile offset); 'off' uses the "
                            "tuned formula; a path caches the table there; 'build' rebuilds it fresh (the default)");
+    specific.add_options()("hold-fix", po::value<std::string>()->implicit_value(""),
+                           "after routing, insert feedthrough LUT buffers to fix hold-time (min-delay) violations; "
+                           "optional value sets the max number of passes (default 8)");
     return specific;
 }
 
@@ -741,6 +744,9 @@ void XilinxImpl::preRoute()
 
 void XilinxImpl::postRoute()
 {
+    // Insert feedthrough buffers on hold-violating arcs and reroute, before
+    // routing is finalised and FASM is written.  No-op unless --xilinx-hold-fix.
+    fixup_hold();
     fixup_routing();
     ctx->assignArchInfo();
     const ArchArgs &args = ctx->args;
