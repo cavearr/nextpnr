@@ -394,6 +394,18 @@ po::options_description CommandHandler::getGeneralOptions()
                           "enable experimental timing-driven ripup in router (deprecated; use --tmg-ripup instead)");
 
     general.add_options()("router2-alt-weights", "use alternate router2 weights");
+    general.add_options()("router2-bb-expand-max", po::value<int>(),
+                          "cap on how many times a congested net's bounding box may grow (one tile per side "
+                          "each time), with the box reset once the net routes clean; 0 = unbounded (default)");
+    general.add_options()("router2-bb-budget",
+                          "size each net's routing box from timing criticality (tight for critical nets, loose "
+                          "for slack ones) instead of growing it on congestion");
+    general.add_options()("router2-bb-budget-max", po::value<int>(),
+                          "loosest box margin in tiles, given to a fully-slack net under --router2-bb-budget "
+                          "(default 60)");
+    general.add_options()("router2-cong-mult", po::value<float>(),
+                          "how much the present-congestion weight grows per router iteration "
+                          "(default 2.0; smaller converges more slowly but stops large designs diverging)");
     general.add_options()("router2-smooth-iters", po::value<int>(),
                           "post-routing congestion smoothing rounds (0 = off, the default)");
     general.add_options()("router2-smooth-weight", po::value<float>(),
@@ -545,6 +557,14 @@ void CommandHandler::setupContext(Context *ctx)
 
     if (vm.count("router2-alt-weights"))
         ctx->settings[ctx->id("router2/alt-weights")] = true;
+    if (vm.count("router2-bb-expand-max"))
+        ctx->settings[ctx->id("router2/bbExpandMax")] = vm["router2-bb-expand-max"].as<int>();
+    if (vm.count("router2-bb-budget"))
+        ctx->settings[ctx->id("router2/bbBudget")] = true;
+    if (vm.count("router2-bb-budget-max"))
+        ctx->settings[ctx->id("router2/bbBudgetMax")] = vm["router2-bb-budget-max"].as<int>();
+    if (vm.count("router2-cong-mult"))
+        ctx->settings[ctx->id("router2/currCongWeightMult")] = std::to_string(vm["router2-cong-mult"].as<float>());
     if (vm.count("router2-smooth-iters"))
         ctx->settings[ctx->id("router2/smoothIters")] = vm["router2-smooth-iters"].as<int>();
     if (vm.count("router2-smooth-weight"))

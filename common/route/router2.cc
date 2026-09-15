@@ -79,6 +79,12 @@ struct Router2
         float max_crit = 0;
         delay_t worst_slack = std::numeric_limits<delay_t>::max();
         int fail_count = 0;
+        // The box as set up, and how many times it has been grown since.  See
+        // the expansion in update_congestion().
+        BoundingBox base_bb;
+        // The pins' own box, before any margin -- what budget mode sizes from.
+        BoundingBox pin_bb;
+        int bb_expansions = 0;
     };
 
     struct WireScore
@@ -197,10 +203,12 @@ struct Router2
                 log_info("%s: bb=(%d, %d)->(%d, %d) c=(%d, %d) hpwl=%d\n", ctx->nameOf(ni), nets.at(i).bb.x0,
                          nets.at(i).bb.y0, nets.at(i).bb.x1, nets.at(i).bb.y1, nets.at(i).cx, nets.at(i).cy,
                          nets.at(i).hpwl);
+            nets.at(i).pin_bb = nets.at(i).bb;
             nets.at(i).bb.x0 = std::max(nets.at(i).bb.x0 - cfg.bb_margin_x, 0);
             nets.at(i).bb.y0 = std::max(nets.at(i).bb.y0 - cfg.bb_margin_y, 0);
             nets.at(i).bb.x1 = std::min(nets.at(i).bb.x1 + cfg.bb_margin_x, ctx->getGridDimX());
             nets.at(i).bb.y1 = std::min(nets.at(i).bb.y1 + cfg.bb_margin_y, ctx->getGridDimY());
+            nets.at(i).base_bb = nets.at(i).bb;
             i++;
         }
     }
@@ -1241,6 +1249,31 @@ struct Router2
     std::vector<int> route_queue;
     std::set<int> failed_nets;
 
+    // Size a net's bounding box from its timing criticality, not from how many
+    // times it has failed to route.  This is the inverse of grow-on-congestion:
+    // a critical net (crit -> 1) gets the TIGHTEST box, which forces its route
+    // short and leaves the negotiated-congestion loop to clear the short lanes
+    // for it by ripping up the slack nets in the way; a slack net (crit -> 0)
+    // gets the LOOSEST box, free to detour around congestion and stay off those
+    // lanes.  The box thus encodes "how short must this be", which is a timing
+    // property, rather than "how stuck is this", which drove the divergence.
+    //
+    // bb_expansions is added on top as a back-off: a critical net that its tight
+    // box leaves genuinely unroutable earns a little room per failed iteration
+    // (capped), and gets it back the moment it routes clean.  So the tightness
+    // is a target, not a trap.
+    void apply_budget_bb(PerNetData &nd)
+    {
+        // crit in [0,1]; loose in [0,1] is 0 for the most critical net.
+        float loose = nd.max_crit >= 1.0f ? 0.0f : (1.0f - nd.max_crit);
+        int span_x = cfg.bb_margin_x + int((cfg.bb_budget_max - cfg.bb_margin_x) * loose) + nd.bb_expansions;
+        int span_y = cfg.bb_margin_y + int((cfg.bb_budget_max - cfg.bb_margin_y) * loose) + nd.bb_expansions;
+        nd.bb.x0 = std::max(nd.pin_bb.x0 - span_x, 0);
+        nd.bb.y0 = std::max(nd.pin_bb.y0 - span_y, 0);
+        nd.bb.x1 = std::min(nd.pin_bb.x1 + span_x, ctx->getGridDimX());
+        nd.bb.y1 = std::min(nd.pin_bb.y1 + span_y, ctx->getGridDimY());
+    }
+
     void update_congestion()
     {
         total_wire_overuse = 0;
@@ -1291,8 +1324,51 @@ struct Router2
             auto &net_data = nets.at(n);
             ++net_data.fail_count;
             if ((net_data.fail_count % 3) == 0) {
-                // Every three times a net fails to route, expand the bounding box to increase the search space
-                ctx->expandBoundingBox(net_data.bb);
+                // Every three times a net fails to route, expand the bounding box to increase the search space.
+                //
+                // Unbounded, this is one tile per side every third overused
+                // iteration, forever: a net that stays congested for 160
+                // iterations ends up with a box 53 tiles bigger on every side
+                // than it started, which on this fabric is the whole device.
+                // That is the regime in which large designs DIVERGE -- overuse
+                // falls to a floor around iteration 30 and then climbs, with
+                // total wire use climbing alongside it, because a net with a
+                // device-sized box and a present-cost weight that has grown
+                // without limit takes an ever-longer detour, and the detours
+                // collide with each other faster than the hotspots clear.  A
+                // wider box in that regime is more room to make a worse
+                // choice.  So with bbExpandMax set, stop growing after that
+                // many expansions.
+                if (cfg.bb_budget) {
+                    // The box is rebuilt from criticality every iteration, so
+                    // growing it here would be overwritten; accumulate the
+                    // back-off margin instead and let apply_budget_bb() pick it
+                    // up next iteration.  Capped so a stubborn net cannot walk
+                    // its box across the device the way the unbounded path did.
+                    int cap = cfg.bb_expand_max > 0 ? cfg.bb_expand_max : 12;
+                    if (net_data.bb_expansions < cap)
+                        ++net_data.bb_expansions;
+                } else if (cfg.bb_expand_max == 0 || net_data.bb_expansions < cfg.bb_expand_max) {
+                    ctx->expandBoundingBox(net_data.bb);
+                    ++net_data.bb_expansions;
+                }
+            }
+        }
+        // ...and let the pressure decay.  A net that routes clean this
+        // iteration no longer needs the box it earned while it was congested;
+        // give it back its starting box, so that when a neighbour disturbs it
+        // later it searches close to home first rather than across the device.
+        // Only with bbExpandMax set or in budget mode, so the default path is
+        // untouched.
+        if (cfg.bb_expand_max > 0 || cfg.bb_budget) {
+            for (size_t i = 0; i < nets.size(); i++) {
+                auto &nd = nets.at(i);
+                if (nd.fail_count == 0 || failed_nets.count(int(i)))
+                    continue;
+                nd.fail_count = 0;
+                nd.bb_expansions = 0;
+                if (!cfg.bb_budget)
+                    nd.bb = nd.base_bb; // budget mode rebuilds bb from crit next iteration
             }
         }
     }
@@ -2181,6 +2257,8 @@ struct Router2
                         net.max_crit = std::max(net.max_crit, tmg.get_criticality(key));
                         net.worst_slack = std::min(net.worst_slack, delay_t(tmg.get_setup_slack(key)));
                     }
+                    if (cfg.bb_budget)
+                        apply_budget_bb(net);
                 }
                 if (cfg.slack_order) {
                     // Worst absolute slack first, rather than highest
@@ -2319,6 +2397,16 @@ Router2Cfg::Router2Cfg(Context *ctx)
     global_backwards_max_iter = ctx->setting<int>("router2/glbBwdMaxIter", 200);
     bb_margin_x = ctx->setting<int>("router2/bbMargin/x", 3);
     bb_margin_y = ctx->setting<int>("router2/bbMargin/y", 3);
+    // Cap on how many times a congested net's bounding box may grow, and with
+    // it a reset of the box once the net routes clean.  0 keeps the unbounded
+    // behaviour.  See the expansion in update_congestion().
+    bb_expand_max = ctx->setting<int>("router2/bbExpandMax", 0);
+    // Size boxes from criticality rather than growing them on congestion.  The
+    // loosest margin (a fully-slack net) defaults to 60 tiles: room to detour
+    // right around a congested region without the whole-device search cost that
+    // sizing every slack net's box at the fabric edge would incur.
+    bb_budget = ctx->setting<bool>("router2/bbBudget", false);
+    bb_budget_max = ctx->setting<int>("router2/bbBudgetMax", 60);
     ipin_cost_adder = ctx->setting<float>("router2/ipinCostAdder", 0.0f);
     bias_cost_factor = ctx->setting<float>("router2/biasCostFactor", 0.25f);
     if (ctx->settings.count(ctx->id("router2/alt-weights"))) {

@@ -72,6 +72,16 @@ struct Router2Cfg
     // Order the route queue by worst absolute slack rather than by criticality.
     bool slack_order;
 
+    // Bound on bounding-box growth for congested nets; 0 = unbounded (the
+    // historical behaviour).
+    int bb_expand_max;
+
+    // Size each net's box from timing criticality (tight for critical, loose
+    // for slack) instead of growing it on congestion; bb_budget_max is the
+    // loosest margin, given to a fully-slack net.
+    bool bb_budget;
+    int bb_budget_max;
+
     // Print additional performance profiling information
     bool perf_profile = false;
 
