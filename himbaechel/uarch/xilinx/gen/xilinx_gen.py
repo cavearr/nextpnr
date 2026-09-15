@@ -119,6 +119,21 @@ _bits_cache = {}
 bits_stats = {"known": 0, "nobits": 0, "notiledb": 0}
 nobits_by_tiletype = {}
 
+def dealias_tile_type(tile_type):
+    """The tile type whose bit database actually expresses this tile.
+
+    A top/bottom-of-column ``*_SING`` I/O tile carries no ``segbits_*_sing.db``
+    of its own in any family: prjxray expresses it through the *base* tile type
+    (``RIOI3_SING`` -> ``RIOI3``, ``LIOB33_SING`` -> ``LIOB33``, ...), resolving
+    the tilegrid ``alias`` at assembly time (grid.py, TileSegbitsAlias).  The
+    db revisions we build chipdbs against do not all carry that alias metadata
+    in tilegrid.json, and the ``_SING`` suffix is the stable convention, so we
+    strip it here.  Only a ``ppips_*_sing.db`` (the "0"-half pseudo-pips) ever
+    exists for a SING tile, and it is merged in on top of the base type."""
+    if tile_type.endswith("_SING"):
+        return tile_type[:-len("_SING")]
+    return tile_type
+
 def tile_type_features(tile_type):
     """Set of fasm feature keys prjxray can express for this tile type.
     Returns None if the tile type has no bit database at all."""
@@ -126,16 +141,30 @@ def tile_type_features(tile_type):
         return _bits_cache[tile_type]
     feats = set()
     found_any = False
-    for kind in ("segbits", "ppips"):
-        fn = path.join(xraydb_root_for_bits, f"{kind}_{tile_type.lower()}.db")
-        if not path.exists(fn):
-            continue
-        found_any = True
-        with open(fn) as f:
-            for ln in f:
-                ln = ln.strip()
-                if ln:
-                    feats.add(ln.split()[0])
+    # Read this tile's own db files, and -- for an aliased SING tile -- the
+    # base type's as well.  Feature rows are prefixed with the file's own tile
+    # type (``RIOI3.`` vs ``RIOI3_SING.``); pip_has_bits keys on the actual
+    # tile type, so base-type keys are re-prefixed to match.  Without this,
+    # every bitful pip of a SING tile (all in the base segbits db) is falsely
+    # marked NO_BITS and the router cannot bring a clock into an upper-SING
+    # OLOGIC -- the "Failed to route ... OLOGIC ... CLKINV_OUT" abort.
+    base = dealias_tile_type(tile_type)
+    lookup_types = [tile_type] if base == tile_type else [tile_type, base]
+    for lt in lookup_types:
+        for kind in ("segbits", "ppips"):
+            fn = path.join(xraydb_root_for_bits, f"{kind}_{lt.lower()}.db")
+            if not path.exists(fn):
+                continue
+            found_any = True
+            with open(fn) as f:
+                for ln in f:
+                    ln = ln.strip()
+                    if not ln:
+                        continue
+                    key = ln.split()[0]
+                    if lt != tile_type and key.startswith(lt + "."):
+                        key = tile_type + key[len(lt):]
+                    feats.add(key)
     result = feats if found_any else None
     _bits_cache[tile_type] = result
     return result
