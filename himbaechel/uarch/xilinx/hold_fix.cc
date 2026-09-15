@@ -547,9 +547,21 @@ void XilinxImpl::fixup_hold()
             break;
     }
 
-    if (total_detours > 0 || total_buffers > 0)
+    if (total_detours > 0 || total_buffers > 0) {
         log_info("Hold-fix: %d detour(s) + %d feedthrough buffer(s) total; %zu hold violation(s) remain.\n",
                  total_detours, total_buffers, ctx->timing_result.min_delay_violations.size());
+
+        // The timing analysis in Arch::route ran BEFORE this pass and flagged the
+        // hold violations we have now fixed as a nonfatal error -- a sticky flag
+        // that fails the run regardless of the fix.  Re-judge the finished design
+        // so the exit status reflects the POST-fix state: a clean fix passes,
+        // while any residual hold violation, or a genuine setup failure, still
+        // fails.  This is what lets hold-fix run without --timing-allow-fail and
+        // still surface real timing failures.
+        had_nonfatal_error = false;
+        timing_analysis(ctx, false /*histogram*/, false /*fmax*/, false /*path*/, true /*warn_on_failure*/,
+                        true /*update_results*/);
+    }
 }
 
 NEXTPNR_NAMESPACE_END
