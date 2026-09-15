@@ -41,8 +41,6 @@
 NEXTPNR_NAMESPACE_BEGIN
 
 namespace {
-// Identity 6-LUT: O6(a5..a0) = a0 = A1.  INIT[i] set for odd i -> 0xAAAA...
-constexpr int64_t LUT_BUF_INIT = int64_t(0xAAAAAAAAAAAAAAAAULL);
 constexpr int DEFAULT_MAX_PASSES = 8;
 // How far out (in tiles) to look for a free LUT bel to host a buffer.
 constexpr int PLACE_SEARCH_RADIUS = 12;
@@ -78,13 +76,23 @@ static BelId place_hold_buffer(XilinxImpl *impl, Context *ctx, CellInfo *buf, Lo
                 continue;
             if (!ctx->checkBelAvail(bel))
                 continue;
-            // The 6-LUT and its sibling 5-LUT at the same slice position share
-            // the physical input pins (A1-A6).  A cell in the 5-LUT with a
-            // different net on those pins collides with our A1 -- surfacing as
-            // "attempting to reserve sink input path wire ... for nets X and Y"
-            // at route setup.  Require the 5-LUT free too.
-            BelId sib = ctx->getBelByLocation(Loc(l.x, l.y, (l.z & ~0xF) | BEL_5LUT));
-            if (sib != BelId() && !ctx->checkBelAvail(sib))
+            // Require the whole tile's slice bels free before hosting a buffer.
+            // A lone LUT shares physical input pins with its sibling 5-LUT
+            // (A1-A6) and slice control wires (SRUSEDMUX etc.) with the rest of
+            // the slice; a neighbouring cell -- or a second hold buffer -- with
+            // different nets there collides at route setup ("attempting to
+            // reserve sink input path wire ... for nets X and Y").  Demanding an
+            // empty tile also stops two buffers landing in one tile, since the
+            // first bind makes the tile non-empty for the next search.
+            bool tile_free = true;
+            for (BelId b2 : ctx->getBelsByTile(x, y)) {
+                IdString bt = ctx->getBelType(b2);
+                if ((bt == id_SLICE_LUTX || bt == id_SLICE_FFX) && !ctx->checkBelAvail(b2)) {
+                    tile_free = false;
+                    break;
+                }
+            }
+            if (!tile_free)
                 continue;
             ctx->bindBel(bel, buf, STRENGTH_STRONG);
             if (impl->isBelLocationValid(bel))
@@ -214,7 +222,15 @@ void XilinxImpl::fixup_hold()
             CellInfo *buf = ctx->createCell(ctx->idf("%s$holdbuf%d", net->name.c_str(ctx), total_buffers), id_SLICE_LUTX);
             buf->addInput(id_A1);
             buf->addOutput(id_O6);
-            buf->params[id_INIT] = Property(LUT_BUF_INIT, 64);
+            // Present the cell as a packed LUT1 identity buffer, exactly as the
+            // LUT packer would (X_ORIG_TYPE + per-pin X_ORIG_PORT_* attrs), so
+            // the FASM writer's get_inputs()/get_lut_init() accept it and expand
+            // the 2-bit logical INIT (O6 = A1) to the physical 64.  Without
+            // these attrs the writer asserts "unsupported LUT-type cell".
+            buf->params[id_INIT] = Property(2, 2); // LUT1 truth table: O = I0
+            buf->attrs[id_X_ORIG_TYPE] = std::string("LUT1");
+            buf->attrs[ctx->id("X_ORIG_PORT_A1")] = std::string("I0");
+            buf->attrs[ctx->id("X_ORIG_PORT_O6")] = std::string("O");
             buf->connectPort(id_A1, net);       // buffer input  = original net
             buf->connectPort(id_O6, buf_out);   // buffer output = new net
 
@@ -267,16 +283,22 @@ void XilinxImpl::fixup_hold()
         if (placed == 0)
             break;
 
-        // 4. Rip up ALL routing so the reroute negotiates congestion globally.
-        //    Ripping only the touched nets deadlocks: router2 keeps every
-        //    already-routed arc (check_arc_routing -> skip) and never rips it,
-        //    so a newly inserted buffer arc that collides with a pre-routed net
-        //    can never displace it -- overuse floors at a few wires and the
-        //    router spins forever.  A full rip-up makes the second router2 a
-        //    fresh negotiated route, like the first, which converges.
-        (void)touched_nets;
-        for (auto &net_pair : ctx->nets) {
-            NetInfo *net = net_pair.second.get();
+        // 4. Rip up only the touched source nets (minimal perturbation).  Each
+        //    buffer's input is a new sink on its source net, so rerouting just
+        //    those nets picks up the buffer arc while every other net keeps its
+        //    routing -- this is what keeps the pass convergent.  A full rip-up
+        //    instead re-routes the whole design each pass, and because a buffer
+        //    shifts its source net's routing to its *other* sinks, that churns
+        //    fresh hold violations into existence and diverges (6 -> 38).
+        //    router2 still rips a pre-routed net locally if a buffer arc
+        //    overuses one of its wires (check_arc_routing's curr_cong test), so
+        //    congestion resolves without a global rip-up; empty-tile buffer
+        //    placement keeps the new arcs clear of unresolvable reserved-wire
+        //    collisions, which is what deadlocked an earlier minimal attempt.
+        for (IdString nn : touched_nets) {
+            if (!ctx->nets.count(nn))
+                continue;
+            NetInfo *net = ctx->nets.at(nn).get();
             std::vector<WireId> wires;
             wires.reserve(net->wires.size());
             for (auto &w : net->wires)
