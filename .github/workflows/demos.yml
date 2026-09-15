@@ -125,6 +125,11 @@ env:
   # which is inside the noise of the timing model -- to 218.48 MHz.  A design
   # that only just passes is a design whose next placement may not.
   PNR_PLACER_FLAGS: --placer-heap-timingweight 60
+  # Every P&R invocation below also passes `-o hold-fix`: after routing, fix any
+  # hold-time (min-delay) violations by lengthening the short arc -- a routing
+  # detour for small deficits, a feedthrough LUT for larger ones.  A no-op where
+  # there are no violations, so it is on by default.  The tight-timing designs
+  # the measured delay matrix packs are exactly the ones that grow hold problems.
   # Pinned to make the gate reproducible: the chipdb is generated from
   # prjxray-db and the frames from prjxray's fasm2frames, so a moving
   # database or tool revision would change what is measured.
@@ -674,7 +679,7 @@ jobs:
                --json "${{ matrix.name }}.json" \
                -o fasm="${{ matrix.name }}.fasm" \
                ${{ matrix.lvs && format('-o placement={0}_placement.json', matrix.name) || '' }} \
-               --router router2 $PNR_PLACER_FLAGS 2>&1 | tee pnr.log; then
+               --router router2 -o hold-fix $PNR_PLACER_FLAGS 2>&1 | tee pnr.log; then
             if [ -f "$known" ]; then
               echo "::error::${{ matrix.name }} now places and routes, but a known"
               echo "P&R failure is still recorded in $known.  If the defect is"
@@ -742,7 +747,7 @@ jobs:
           set -o pipefail
           known="nextpnr/.github/references/${{ matrix.name }}.pnr-known-failure"
           if make -C "demo-projects/${{ matrix.project }}" all \
-                  PNR_ARGS="--seed $SEED $PLACEMENT $PNR_PLACER_FLAGS" 2>&1 | tee build.log; then
+                  PNR_ARGS="--seed $SEED $PLACEMENT -o hold-fix $PNR_PLACER_FLAGS" 2>&1 | tee build.log; then
             if [ -f "$known" ]; then
               echo "::error::${{ matrix.name }} now builds, but a known P&R"
               echo "failure is still recorded in $known.  If the defect is"
@@ -820,7 +825,7 @@ jobs:
             -o xdc="$EX/${{ matrix.xdc }}" \
             --json "${{ matrix.name }}.json" \
             -o fasm="${{ matrix.name }}.fasm" \
-            --router router2 --timing-allow-fail $ENTRY_PNR_FLAGS 2>&1 | tee pnr.log
+            --router router2 --timing-allow-fail -o hold-fix $ENTRY_PNR_FLAGS 2>&1 | tee pnr.log
           grep -E "Max frequency|Device utilisation" -A12 pnr.log | tail -25 || true
 
       # ---------------- common: assemble ----------------
