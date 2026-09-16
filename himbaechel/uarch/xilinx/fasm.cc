@@ -4683,13 +4683,45 @@ void XilinxImpl::write_placement(const std::string &filename)
         return r;
     };
 
-    out << "{\n";
-    bool first = true;
+    // pack_idelayctrl() turns the one synthesis IDELAYCTRL into a copy per
+    // IOCTRL column -- named <orig>$intcell$CTRL_DUP_<n> -- and drops the
+    // original, because the silicon needs one per column while the netlist
+    // asks for one.  An external LVS census works from the synthesis and so
+    // knows only that one cell; left as-is it reports it dropped.  Collapse the
+    // copies back to a single entry under the original name, once verified they
+    // all distribute the same REFCLK and RST, so the two descriptions agree.
+    const std::string kDupTag = "$intcell$CTRL_DUP_";
+    std::map<std::string, CellInfo *> idelay_orig;  // original name -> representative copy
+    std::set<IdString> idelay_dup;                  // copies to emit under the merged name
     for (auto &cell : ctx->cells) {
         CellInfo *ci = cell.second.get();
         if (ci->bel == BelId())
             continue;
-        std::string tile = tile_name(ci->bel.tile);
+        // Placement legalisation retypes the cell to its site/bel form
+        // (IDELAYCTRL_IDELAYCTRL), so match on the copy's name -- the signature
+        // pack_idelayctrl() gives it -- and confirm the bel to be safe.
+        std::string n = ci->name.str(ctx);
+        auto at = n.find(kDupTag);
+        if (at == std::string::npos)
+            continue;
+        if (bel_name_in_site(ci->bel).str(ctx).find("IDELAYCTRL") == std::string::npos)
+            continue;
+        std::string orig = n.substr(0, at);
+        idelay_dup.insert(ci->name);
+        auto it = idelay_orig.find(orig);
+        if (it == idelay_orig.end()) {
+            idelay_orig[orig] = ci;
+        } else if (ci->getPort(id_REFCLK) != it->second->getPort(id_REFCLK) ||
+                   ci->getPort(id_RST) != it->second->getPort(id_RST)) {
+            log_error("IDELAYCTRL copies of '%s' distribute different REFCLK/RST; "
+                      "cannot merge them for the placement dump\n",
+                      orig.c_str());
+        }
+    }
+
+    out << "{\n";
+    bool first = true;
+    auto emit = [&](const std::string &name, CellInfo *ci) {
         SiteIndex site = get_bel_site(ci->bel);
         // PSEUDO_VCC / PSEUDO_GND and friends sit on bels with no site at all,
         // so the site index cannot be trusted to be in range here.
@@ -4700,12 +4732,24 @@ void XilinxImpl::write_placement(const std::string &filename)
         if (!first)
             out << ",\n";
         first = false;
-        out << "  \"" << escape(ci->name.str(ctx)) << "\": {"
-             << "\"tile\": \"" << escape(tile) << "\", "
+        out << "  \"" << escape(name) << "\": {"
+             << "\"tile\": \"" << escape(tile_name(ci->bel.tile)) << "\", "
              << "\"site\": \"" << escape(site_str) << "\", "
              << "\"bel\": \"" << escape(bel_name_in_site(ci->bel).str(ctx)) << "\", "
              << "\"type\": \"" << escape(ci->type.str(ctx)) << "\"}";
+    };
+    for (auto &cell : ctx->cells) {
+        CellInfo *ci = cell.second.get();
+        if (ci->bel == BelId())
+            continue;
+        // A duplicated IDELAYCTRL is emitted once, below, under its original
+        // name rather than per copy.
+        if (idelay_dup.count(ci->name))
+            continue;
+        emit(ci->name.str(ctx), ci);
     }
+    for (const auto &kv : idelay_orig)
+        emit(kv.first, kv.second);
     out << (first ? "" : "\n") << "}\n";
     log_info("Wrote placement of %d cells to %s\n", int(ctx->cells.size()), filename.c_str());
 }
