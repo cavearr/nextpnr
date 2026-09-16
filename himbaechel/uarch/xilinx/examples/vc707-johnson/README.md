@@ -62,17 +62,18 @@ The **input** side matches: `RIOB18_X312Y287` (the LVDS clock) and
 `IBUFDS_BANK_GLUE`, `DIFF.ZIBUF_LOW_PWR`, `IBUF_HP_BANK_GLUE` and the
 partner-half `PULLTYPE.PULLDOWN`.
 
-The **output** side does not.  Per LED half the legacy flow writes 8 features
-and this uarch writes 3, and the difference is a strict subset -- 36 features
-the legacy flow emits and this one omits, nothing the other way round:
+The **output** side still does not.  The remaining delta is now five features:
+four the legacy flow writes on the `LIOB18_SING_X81Y51.IOB_Y1` LED half and
+one extra partner-half pulldown this uarch writes on `LIOB18_X81Y133.IOB_Y1`:
 
-    OBUF_HP_BANK_GLUE
     LVCMOS18.DRIVE.I12_I8
     LVCMOS12_LVCMOS15_LVCMOS18_LVCMOS25_LVCMOS33_LVTTL_SSTL135_SSTL15.SLEW.SLOW
     LVCMOS12_LVCMOS15_LVCMOS18_SSTL135_SSTL15.STEPDOWN
+    PULLTYPE.PULLDOWN
 
-`LIOB18_X81Y133.IOB_Y1` is missing entirely -- the legacy flow configures the
-unused partner half of an HP output pair, this one leaves it blank.
+`OBUF_HP_BANK_GLUE` on the `LIOB18_SING_X81Y51` LED half now matches the legacy
+flow; the recorded delta below was updated when the SING-tile bit lookup
+started expressing it again.
 
 That gap is recorded, not asserted to be correct, in
 `.github/references/vc707-johnson-iob-delta.txt`, and
