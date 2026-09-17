@@ -66,8 +66,11 @@ fi
 # Extraction: the bitstream back to a fabric netlist.  A primitive the tile
 # model does not cover stops it here, which is a blocker rather than a
 # difference -- nothing has been compared yet.
+# The placement goes to the extractor too: not to place anything -- it never
+# reads a placement for that -- but as the witness for what no bit records,
+# a RAMB36E1 against two RAMB18E1 in the same tile (see tileverilog).
 if ! "$TILEVERILOG" --fasm "$fasm" --db "$PRJXRAY_DB/$family" --device "$device" \
-        --xdc "$xdc" --part "$part" --out "$d/fabric.v" \
+        --xdc "$xdc" --part "$part" --placement "$placement" --out "$d/fabric.v" \
         --model-out "$d/tile_model.v" >>"$log" 2>&1; then
     echo "::notice::$name: blocked -- extraction from the bitstream failed"
     tail -15 "$log"
