@@ -31,6 +31,7 @@
  *   - To make the placer timing-driven, the bound2bound weights are multiplied by (1 + 10 * crit^2)
  */
 
+#include <algorithm>
 #include <cmath>
 #include "placer_heap.h"
 #include <Eigen/Core>
@@ -1662,18 +1663,34 @@ class HeAPPlacer
                     for (int y = miny; y <= maxy; y++)
                         congestion.at(x).at(y) += float(dens);
             }
-            double total = 0; int n = 0;
+            // Normalise by the mean over OCCUPIED tiles only.  Averaging in the
+            // empty sea of a sparse design drives the mean to near zero and
+            // every used tile reads as wildly "hot" (johnson peaked at 1574x);
+            // the occupied-tile mean makes "above 1.0" mean genuinely denser
+            // than its routing-using peers.
+            // Normalise by the MEDIAN over occupied tiles (robust to the RUDY
+            // power-law: a few tiles the whole design crosses read thousands of
+            // times typical, so the mean is dragged up and almost nothing reads
+            // "hot"; the median keeps "above 1.0" meaning denser than typical).
+            std::vector<float> occ;
             for (int x = 0; x < W; x++)
-                for (int y = 0; y < H; y++) { total += congestion.at(x).at(y); ++n; }
-            float mean = (total > 0 && n > 0) ? float(total / n) : 1.0f;
+                for (int y = 0; y < H; y++)
+                    if (congestion.at(x).at(y) > 0.0f) occ.push_back(congestion.at(x).at(y));
+            float mean = 1.0f;
+            if (!occ.empty()) {
+                std::nth_element(occ.begin(), occ.begin() + occ.size() / 2, occ.end());
+                mean = occ.at(occ.size() / 2);
+                if (mean <= 0) mean = 1.0f;
+            }
             if (mean <= 0) mean = 1.0f;
-            float peak = 0;
+            float peak = 0; int hot = 0;
             for (int x = 0; x < W; x++)
                 for (int y = 0; y < H; y++) {
                     congestion.at(x).at(y) /= mean;
                     peak = std::max(peak, congestion.at(x).at(y));
+                    if (congestion.at(x).at(y) > 1.0f) ++hot;
                 }
-            log_info("    congestion-spread: RUDY map built, peak %.1fx mean (weight %.2f)\n", peak, cong_w);
+            log_info("    congestion-spread: RUDY map built, peak %.1fx median, %d hot tiles (weight %.2f)\n", peak, hot, cong_w);
         }
 
         bool is_cell_fixed(const CellInfo &cell) const
