@@ -4,7 +4,7 @@ export MISTRAL_PATH=${DEPS_PATH}/mistral
 
 function get_dependencies {
     # Fetch mistral
-    mkdir -p ${MISTRAL_PATH}
+    mkdir -p ${DEPS_PATH}
     git clone --recursive https://github.com/Ravenslofty/mistral.git ${MISTRAL_PATH}
     pushd ${MISTRAL_PATH}
     git reset --hard ${MISTRAL_REVISION}

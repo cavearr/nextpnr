@@ -4,7 +4,7 @@
 function build_yosys {
     PREFIX=`pwd`/.yosys
     YOSYS_PATH=${DEPS_PATH}/yosys
-    mkdir -p ${YOSYS_PATH}
+    mkdir -p ${DEPS_PATH}
     git clone --recursive https://github.com/YosysHQ/yosys ${YOSYS_PATH}
     pushd ${YOSYS_PATH}
     git reset --hard ${YOSYS_REVISION}
@@ -16,7 +16,7 @@ function build_yosys {
 function build_icestorm {
     PREFIX=`pwd`/.icestorm
     ICESTORM_PATH=${DEPS_PATH}/icestorm
-    mkdir -p ${ICESTORM_PATH}
+    mkdir -p ${DEPS_PATH}
     git clone --recursive https://github.com/YosysHQ/icestorm ${ICESTORM_PATH}
     pushd ${ICESTORM_PATH}
     git reset --hard ${ICESTORM_REVISION}
@@ -28,7 +28,7 @@ function build_icestorm {
 function build_trellis {
     PREFIX=`pwd`/.trellis
     TRELLIS_PATH=${DEPS_PATH}/prjtrellis
-    mkdir -p ${TRELLIS_PATH}
+    mkdir -p ${DEPS_PATH}
     git clone --recursive https://github.com/YosysHQ/prjtrellis ${TRELLIS_PATH}
     pushd ${TRELLIS_PATH}
     git reset --hard ${TRELLIS_REVISION}
@@ -45,7 +45,7 @@ function build_prjoxide {
     PREFIX=`pwd`/.prjoxide
     PRJOXIDE_PATH=${DEPS_PATH}/prjoxide
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y ;\
-    mkdir -p ${PRJOXIDE_PATH}
+    mkdir -p ${DEPS_PATH}
     git clone --recursive https://github.com/gatecat/prjoxide ${PRJOXIDE_PATH}
     pushd ${PRJOXIDE_PATH}
     git reset --hard ${PRJOXIDE_REVISION}

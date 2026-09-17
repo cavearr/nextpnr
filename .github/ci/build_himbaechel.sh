@@ -6,6 +6,7 @@ export PEPPERCORN_PATH=${DEPS_PATH}/prjpeppercorn
 
 
 function get_dependencies {
+    mkdir -p ${DEPS_PATH}
     # Fetch prjxray-db
     git clone https://github.com/openXC7/prjxray-db ${XRAY_DB_PATH}
     # Fetch apycula
@@ -18,9 +19,9 @@ function build_nextpnr {
     mkdir build
     pushd build
     cmake .. -DARCH=himbaechel -DHIMBAECHEL_UARCH="gowin;xilinx;example;gatemate" -DHIMBAECHEL_EXAMPLE_DEVICES=example \
-        -D HIMBAECHEL_XILINX_DEVICES="xc7a50t" -D HIMBAECHEL_PRJXRAY_DB=${XRAY_DB_PATH} \
-        -D HIMBAECHEL_GOWIN_DEVICES="GW1N-9C;GW5A-25A" \
-        -D HIMBAECHEL_PEPPERCORN_PATH=${PEPPERCORN_PATH}
+        -DHIMBAECHEL_XILINX_DEVICES="xc7a50t" -DHIMBAECHEL_PRJXRAY_DB=${XRAY_DB_PATH} \
+        -DHIMBAECHEL_GOWIN_DEVICES="GW1N-9C;GW5A-25A" \
+        -DHIMBAECHEL_PEPPERCORN_PATH=${PEPPERCORN_PATH}
     make nextpnr-himbaechel -j`nproc`
     popd
 }
