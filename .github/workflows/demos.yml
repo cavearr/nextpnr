@@ -322,18 +322,11 @@ jobs:
           # recently, wrong enough to freeze real hardware (openXC7 #177).
           # Two entries because the DDR one reaches the memory controller
           # and the minimal one is the fast smoke test.
-          # RECORDED P&R FAILURE: the same SING tile as litex-ddr-arty-s7
-          # below, reached by whichever clock pin the router gives up on
-          # first -- which depends on placement, so both entries record the
-          # tile and site and stop before the pin name.  Recording
-          # CLKDIVINV_OUT for one and CLKINV_OUT for the other looked like
-          # two distinct defects; changing the placer settings swapped them
-          # over, which is how it became clear they are one.  Both boards' constraint
-          # file pins ddram_reset_n to J6, whose OLOGIC is in
-          # RIOI3_SING_X43Y49; here it is the OLOGIC clock rather than the
-          # divider, and segbits+ppips for RIOI3_SING carry 2 OLOGIC*CLK*
-          # features against 32 for plain RIOI3.  One under-fuzzed tile type
-          # accounts for both designs.
+          # P&R now completes for the Spartan-7 LiteX Arty designs, but the
+          # extracted netlist is still not equivalent to the synthesis: both
+          # entries carry the same remaining LiteX/Spartan-7 LVS mismatch
+          # (tag_mem_dat0 plus DDR reset/write control), recorded below so the
+          # gate stays green until that underlying issue is fixed.
           - name: litex-minimal-arty-s7
             tier: essential
             lvs: true
@@ -347,30 +340,10 @@ jobs:
             seed: 1
             timeout: 120
 
-          # RECORDED P&R FAILURE: an OSERDESE2 that cannot be configured.
-          #
-          # LiteX drives every DDR output through an OSERDESE2 with CLKDIV
-          # connected (45 of them here), and ddram_reset_n is pinned to J6 --
-          # IOB_X1Y49, whose OLOGIC sits in RIOI3_SING_X43Y49.  prjxray's
-          # spartan7 SING databases define NO OLOGIC CLKDIV feature at all:
-          # segbits+ppips for RIOI3_SING carry 71 features against 531 for
-          # plain RIOI3, which has all 24 OLOGIC*CLKDIV routes including the
-          # IOI_OLOGIC0_CLKDIV <- IOI_IMUX8_* one wanted here.  So the clock
-          # cannot reach that divider in a SING tile, and a LOC pins the cell
-          # there -- the placer has no say.
-          #
-          # This is not new breakage.  The chipdb generator now flags every
-          # tile-routing pip absent from both bit databases (PIP_CFG_NO_BITS)
-          # and XilinxImpl::is_pip_unavail refuses it, so the router says so
-          # out loud.  Before that the pip was routed, the feature was written,
-          # fasm2frames dropped it under XRAY_ALLOW_MISSING_FEATURES, and the
-          # board got a bitstream whose DDR PHY divider clock was simply
-          # absent.  The golden frames hash recorded for this design came from
-          # such a build, which is why a recorded hash was never evidence.
-          #
-          # Closing it means fuzzing the SING OLOGIC clock bits in prjxray,
-          # not a change here.  Same under-fuzzed SING tiles as the five
-          # LIOB18_SING features still missing in the VC707 IOB delta.
+          # Same recorded LiteX/Spartan-7 LVS mismatch as litex-minimal-arty-s7
+          # above.  Keep the exact failing proof summary in
+          # .github/references/litex-ddr-arty-s7.lvs-known-failure so the job
+          # fails if the mismatch changes or proves cleanly.
           - name: litex-ddr-arty-s7
             tier: essential
             lvs: true
@@ -931,6 +904,7 @@ jobs:
           PRJXRAY_DB: ${{ github.workspace }}/prjxray-db
           EQUIV_TIMEOUT: 600
           EXPECT_BLOCKED: ${{ matrix.lvs_blocked }}
+          EXPECT_DIFFER: nextpnr/.github/references/${{ matrix.name }}.lvs-known-failure
         run: |
           # Each source keeps its netlist and constraints in its own place:
           # an example synthesises them into the workspace, a demo project

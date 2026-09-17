@@ -16,11 +16,13 @@
 # proved, for a known reason, which is a different statement from "these two
 # netlists differ".
 #
-# EXPECT_BLOCKED names a known extraction gap.  Three outcomes then, kept
+# EXPECT_BLOCKED names a known extraction gap.  EXPECT_DIFFER names a file
+# carrying a recorded non-equivalence signature.  Three outcomes then, kept
 # distinguishable on purpose:
 #   blocked    still stopped by the named gap        expected, exit 0
 #   UNBLOCKED  it proves now -- promote it           exit 1, so it is noticed
-#   DIFFER     it broke somewhere else               exit 1, a real regression
+#   DIFFER     it still fails in the recorded way    expected, exit 0
+#   CHANGED    it now fails differently              exit 1, a real regression
 set -u -o pipefail
 
 name=$1; d=$2; fasm=$3; placement=$4; goldjson=$5; xdc=$6
@@ -107,12 +109,28 @@ if [ "${differ:-1}" = 0 ] && [ "${proved:-0}" -gt 0 ]; then
         echo "The gap is fixed -- drop lvs_blocked for this design so it is gated on."
         exit 1
     fi
+    if [ -n "${EXPECT_DIFFER:-}" ] && [ -f "$EXPECT_DIFFER" ]; then
+        echo "::error::$name: now proves ($proved registers/outputs), but a recorded"
+        echo "non-equivalence is still listed in $EXPECT_DIFFER"
+        echo "The mismatch is fixed -- delete that file so the design is gated on again."
+        exit 1
+    fi
     echo "$name: PROVED $proved registers/outputs, 0 differ"
     exit 0
 fi
 if [ -n "${EXPECT_BLOCKED:-}" ]; then
     echo "::notice::$name: blocked as expected -- $EXPECT_BLOCKED (${differ:-?} differ, ${proved:--} proved)"
     exit 0
+fi
+if [ -n "${EXPECT_DIFFER:-}" ] && [ -f "$EXPECT_DIFFER" ]; then
+    if grep -qFf "$EXPECT_DIFFER" "$log"; then
+        echo "::notice::$name: differs as recorded in $EXPECT_DIFFER (${differ:-?} differ, ${proved:--} proved)"
+        exit 0
+    fi
+    echo "::error::$name: non-equivalence no longer matches recorded failure in $EXPECT_DIFFER"
+    echo "This is no longer the known mismatch; inspect the new difference below."
+    tail -25 "$log"
+    exit 1
 fi
 echo "::error::$name: the extracted netlist is not equivalent to its synthesis -- ${differ:-?} differ, ${proved:--} proved"
 tail -25 "$log"
