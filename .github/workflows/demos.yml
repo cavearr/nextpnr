@@ -501,6 +501,26 @@ jobs:
             timeout: 600
             pnr_flags: --placer-heap-timingweight 100
 
+          # The lowRISC Sonata's Linux SoC: dual-core VexRiscv-SMP with a
+          # shared FPU, 64 KiB I-caches and HyperRAM, on an xc7a50t.  It is
+          # the one entry that needs --placer-heap-congestion-spread.  HeAP
+          # packs this SoC into one corner of the die and router2 never
+          # converges from there (overuse floors at ~5 k wires and climbs);
+          # with congestion-driven spreading it routes to zero overuse.
+          # Pinning the flag here keeps that path exercised.  --freq 25
+          # matches the LiteX build script.  See its README.
+          - name: sonata-linux
+            tier: stretch
+            source: netlist
+            design: sonata-linux
+            netlist: sonata.json.gz
+            xdc: sonata.xdc
+            family: artix7
+            part: xc7a50tcsg324-2
+            die: xc7a50t
+            timeout: 120
+            pnr_flags: --placer-heap-timingweight 60 --placer-heap-congestion-spread --freq 25
+
     steps:
       - uses: actions/checkout@v4
         with:
