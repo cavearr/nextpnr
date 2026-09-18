@@ -243,7 +243,7 @@ bool XilinxPacker::can_add_ff_to_cluster(const CellInfo *lut, const CellInfo *ff
             clk = cell->getPort(id_CK);
             ce = cell->getPort(id_CE);
             sr = cell->getPort(id_SR);
-            is_clkinv = bool_or_default(cell->params, id_IS_CLK_INVERTED, false);
+            is_clkinv = int_or_default(cell->params, id_IS_C_INVERTED, 0) == 1;
             is_srinv = bool_or_default(cell->params, id_IS_R_INVERTED, false) ||
                        bool_or_default(cell->params, id_IS_S_INVERTED, false) ||
                        bool_or_default(cell->params, id_IS_CLR_INVERTED, false) ||
@@ -268,7 +268,8 @@ bool XilinxPacker::can_add_ff_to_cluster(const CellInfo *lut, const CellInfo *ff
     if (ff->getPort(id_SR) != sr)
         return false;
 
-    if (bool_or_default(ff->params, id_IS_CLK_INVERTED, false) != is_clkinv)
+    bool ff_clock_inverted = int_or_default(ff->params, id_IS_C_INVERTED, 0) == 1;
+    if (ff_clock_inverted != is_clkinv)
         return false;
 
     if ((bool_or_default(ff->params, id_IS_R_INVERTED, false) || bool_or_default(ff->params, id_IS_S_INVERTED, false) ||

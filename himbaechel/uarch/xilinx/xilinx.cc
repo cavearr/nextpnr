@@ -901,7 +901,12 @@ void XilinxImpl::assign_cell_tags()
             ct.ff.clk = ci->getPort(id_CK);
             ct.ff.ce = ci->getPort(id_CE);
             ct.ff.sr = ci->getPort(id_SR);
-            ct.ff.is_clkinv = bool_or_default(ci->params, id_IS_CLK_INVERTED, false);
+            // IS_C_INVERTED is what an FF actually carries: yosys writes it, and
+            // pack_ffs sets it for the FD*_1 falling-edge variants.  It is also
+            // what the FASM writer reads for CLKINV, so the legality check has
+            // to agree with it or a rising- and a falling-edge FF can share a
+            // half-slice whose CLKINV bit cannot serve both.
+            ct.ff.is_clkinv = int_or_default(ci->params, id_IS_C_INVERTED, 0) == 1;
             ct.ff.is_srinv = bool_or_default(ci->params, id_IS_R_INVERTED, false) ||
                              bool_or_default(ci->params, id_IS_S_INVERTED, false) ||
                              bool_or_default(ci->params, id_IS_CLR_INVERTED, false) ||
