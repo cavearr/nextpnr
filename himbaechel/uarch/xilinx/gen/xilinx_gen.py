@@ -174,7 +174,8 @@ def tile_type_features(tile_type):
                     if not ln:
                         continue
                     key = ln.split()[0]
-                    if lt != tile_type and key.startswith(lt + "."):
+                    key_names_base_tile = lt != tile_type and key.startswith(lt + ".")
+                    if key_names_base_tile:
                         key = tile_type + key[len(lt):]
                     feats.add(key)
     result = feats if found_any else None
@@ -200,7 +201,8 @@ def pip_has_bits(tile_type, dst_wire, src_wire):
         # top/bottom-of-column OLOGIC -- the "Failed to route ... OLOGIC ...
         # CLKDIVINV_OUT" abort on the LiteX Arty S7 demos.
         keys.append(f"{tile_type}.{dealias_wire_name(dst_wire)}.{dealias_wire_name(src_wire)}")
-    if any(k in feats for k in keys):
+    pip_has_a_feature = any(k in feats for k in keys)
+    if pip_has_a_feature:
         bits_stats["known"] += 1
         return True
     bits_stats["nobits"] += 1
@@ -330,7 +332,8 @@ def import_tiletype(ch: Chip, tile: xilinx_device.Tile):
                 # Overriden z of -1 means we skip this bel
                 if z == -1:
                     continue
-                if is_bram_tile and z == default_z:
+                is_non_semantic_bram_bel = is_bram_tile and z == default_z
+                if is_non_semantic_bram_bel:
                     bram_nonsem_count += 1
                 bel_name = gen_bel_name(sv, bel.name())
                 # Site variants can import overlapping bels (e.g. the

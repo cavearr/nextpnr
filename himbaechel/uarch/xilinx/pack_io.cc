@@ -193,7 +193,8 @@ void XC7Packer::decompose_iob(CellInfo *xil_iob, bool is_hr, const std::string &
 
         CellInfo *inbuf = insert_ibuf(int_name(xil_iob->name, "IBUF", is_se_iobuf), ibuf_type, pad_net, top_out);
         std::string tile = ctx->get_tile_type(site.tile).str(ctx);
-        if (boost::contains(tile, "IOB18"))
+        bool is_hp_bank = boost::contains(tile, "IOB18");
+        if (is_hp_bank)
             ctx->bindBel(uarch->get_site_bel(site, ctx->id("IOB18.INBUF_DCIEN")), inbuf, STRENGTH_LOCKED);
         else
             ctx->bindBel(uarch->get_site_bel(site, ctx->id("IOB33.INBUF_EN")), inbuf, STRENGTH_LOCKED);
@@ -213,7 +214,8 @@ void XC7Packer::decompose_iob(CellInfo *xil_iob, bool is_hr, const std::string &
                 is_se_iobuf ? (has_dci ? id_OBUFT_DCIEN : id_OBUFT) : xil_iob->type, xil_iob->getPort(id_I), pad_net,
                 xil_iob->getPort(id_T));
         std::string tile = ctx->get_tile_type(site.tile).str(ctx);
-        if (boost::contains(tile, "IOB18"))
+        bool is_hp_bank = boost::contains(tile, "IOB18");
+        if (is_hp_bank)
             ctx->bindBel(uarch->get_site_bel(site, ctx->id("IOB18.OUTBUF_DCIEN")), obuf, STRENGTH_LOCKED);
         else
             ctx->bindBel(uarch->get_site_bel(site, ctx->id("IOB33.OUTBUF")), obuf, STRENGTH_LOCKED);
@@ -422,7 +424,8 @@ else if (usr.cell->type.in(id_GTPE2_CHANNEL, id_GTXE2_CHANNEL))
                         constrain_gt(pad_cell, usr.cell);
                 }
             }
-            if (has_gtxe2_channel_direct || has_bufg_direct) {
+            bool drives_a_legal_consumer = has_gtxe2_channel_direct || has_bufg_direct;
+            if (drives_a_legal_consumer) {
                 continue;
             }
             log_error("IBUFDS_GTE2 instance %s output port must be connected to a GTPE2_COMMON, GTXE2_COMMON, "
@@ -433,7 +436,9 @@ else if (usr.cell->type.in(id_GTPE2_CHANNEL, id_GTXE2_CHANNEL))
         // This OBUF is integrated into the GTP/GTX channel pad and does not need placing
         if (buf_cell->type == id_OBUF) {
             NetInfo *net = buf_cell->getPort(id_I);
-            if (net && net->driver.cell && net->driver.cell->type.in(id_GTPE2_CHANNEL, id_GTXE2_CHANNEL)) {
+            bool driven_by_gt_channel =
+                    net && net->driver.cell && net->driver.cell->type.in(id_GTPE2_CHANNEL, id_GTXE2_CHANNEL);
+            if (driven_by_gt_channel) {
                 packed_cells.insert(buf_cell->name);
                 constrain_gt(pad_cell, net->driver.cell);
                 continue;
@@ -442,8 +447,9 @@ else if (usr.cell->type.in(id_GTPE2_CHANNEL, id_GTXE2_CHANNEL))
         // This IBUF is integrated into the GTP/GTX channel pad and does not need placing
         if (buf_cell->type == id_IBUF) {
             NetInfo *net = buf_cell->getPort(id_O);
-            if (net && net->users.entries() == 1 &&
-                (*net->users.begin()).cell->type.in(id_GTPE2_CHANNEL, id_GTXE2_CHANNEL)) {
+            bool feeds_only_a_gt_channel = net && net->users.entries() == 1 &&
+                                           (*net->users.begin()).cell->type.in(id_GTPE2_CHANNEL, id_GTXE2_CHANNEL);
+            if (feeds_only_a_gt_channel) {
                 packed_cells.insert(buf_cell->name);
                 constrain_gt(pad_cell, (*net->users.begin()).cell);
                 continue;
@@ -501,8 +507,9 @@ else if (usr.cell->type.in(id_GTPE2_CHANNEL, id_GTXE2_CHANNEL))
         CellInfo *ci = cell.second.get();
         if (!ci->attrs.count(id_BEL) && ci->bel == BelId())
             continue;
-        if (!hriobuf_rules.count(ci->type) && !hpiobuf_rules.count(ci->type))
-            continue; // not an IO-buffer cell (e.g. a GT channel bel)
+        bool is_io_buffer_cell = hriobuf_rules.count(ci->type) || hpiobuf_rules.count(ci->type);
+        if (!is_io_buffer_cell)
+            continue; // e.g. a GT channel bel
         std::string belname =
                 ci->attrs.count(id_BEL) ? ci->attrs[id_BEL].as_string() : std::string(ctx->nameOfBel(ci->bel));
         size_t pos = belname.find(".");
@@ -558,7 +565,8 @@ void XC7Packer::check_valid_pad(CellInfo *ci, std::string type)
     {
         std::string belname = ci->bel != BelId() ? ctx->nameOfBel(ci->bel)
                                                  : str_or_default(ci->attrs, id_BEL);
-        if (boost::contains(belname, "OPAD") || boost::contains(belname, "IPAD"))
+        bool is_gt_pad = boost::contains(belname, "OPAD") || boost::contains(belname, "IPAD");
+        if (is_gt_pad)
             return;
     }
     auto iostandard_id = id_IOSTANDARD;
@@ -903,9 +911,11 @@ void XC7Packer::pack_iologic()
                 }
                 BelId io_bel;
                 CellInfo *ob = !q_disconnected ? find_p_outbuf(q) : find_p_outbuf(ofb);
+                bool ofb_loops_back_to_iserdes =
+                        ofb && ofb->users.entries() == 1 && (*ofb->users.begin()).cell->type == id_ISERDESE2;
                 if (ob != nullptr) {
                     io_bel = ob->bel;
-                } else if (ofb && ofb->users.entries() == 1 && (*ofb->users.begin()).cell->type == id_ISERDESE2) {
+                } else if (ofb_loops_back_to_iserdes) {
                     // OFB loopback (e.g. DDR read calibration): OSERDESE2's OFB
                     // feeds an ISERDESE2, so there is no IOB to anchor on; the
                     // pair is bound to a free OSERDES/ISERDES site pair after
@@ -995,8 +1005,10 @@ void XC7Packer::pack_iologic()
             // unconstrained pass below.
             {
                 NetInfo *d_ofb = ci->getPort(id_D);
-                if (d_ofb && d_ofb->driver.cell && d_ofb->driver.cell->type == id_OSERDESE2 &&
-                    d_ofb->driver.port == id_OFB)
+                bool d_driven_by_oserdes_ofb = d_ofb && d_ofb->driver.cell &&
+                                               d_ofb->driver.cell->type == id_OSERDESE2 &&
+                                               d_ofb->driver.port == id_OFB;
+                if (d_driven_by_oserdes_ofb)
                     continue;
             }
 
@@ -1044,7 +1056,8 @@ void XC7Packer::pack_iologic()
     for (auto ci : unconstrained_oserdes) {
         BelId oserdes_bel;
         for (auto bel : ctx->getBels()) {
-            if (ctx->getBelType(bel) == id_OSERDESE2_OSERDESE2 && ctx->checkBelAvail(bel)) {
+            bool is_free_oserdes_bel = ctx->getBelType(bel) == id_OSERDESE2_OSERDESE2 && ctx->checkBelAvail(bel);
+            if (is_free_oserdes_bel) {
                 oserdes_bel = bel;
                 break;
             }
@@ -1075,8 +1088,9 @@ SiteIndex XC7Packer::get_ilogic_site_for_ologic(SiteIndex ologic_site)
     const auto &odata = sites[ologic_site.site];
     for (int32_t i = 0; i < int32_t(sites.ssize()); i++) {
         const auto &s = sites[i];
-        if (boost::starts_with(IdString(s.name_prefix).str(ctx), "ILOGIC") && s.site_x == odata.site_x &&
-            s.site_y == odata.site_y)
+        bool is_sibling_ilogic = boost::starts_with(IdString(s.name_prefix).str(ctx), "ILOGIC") &&
+                                 s.site_x == odata.site_x && s.site_y == odata.site_y;
+        if (is_sibling_ilogic)
             return SiteIndex(ologic_site.tile, i);
     }
     NPNR_ASSERT_FALSE("failed to find sibling ILOGIC site for OSERDESE2");
@@ -1172,7 +1186,8 @@ void XC7Packer::pack_cfg()
         CellInfo *ci = cell.second.get();
         if (ci->type == id_BSCAN) {
             int chain = int_or_default(ci->params, id_JTAG_CHAIN, 1);
-            if (chain < 1 || 4 < chain)
+            bool chain_in_range = chain >= 1 && chain <= 4;
+            if (!chain_in_range)
                 log_error("Instance '%s': Invalid JTAG_CHAIN number of '%d'. Allowed values are: 1-4.\n",
                           ci->name.c_str(ctx), chain);
         }
@@ -1180,8 +1195,10 @@ void XC7Packer::pack_cfg()
         // site; the placer cannot discover that site on its own, so without
         // preplacement it aborts with "Unable to find legal placement for
         // cell".  (Port of nextpnr-xilinx d42d6c9b.)
-        if (ci->type.in(id_BSCAN, id_DCIRESET_DCIRESET, id_DNA_PORT_DNA_PORT, id_EFUSE_USR_EFUSE_USR, id_ICAP_ICAP,
-                        id_FRAME_ECC_FRAME_ECC, id_STARTUP_STARTUP, id_USR_ACCESS_USR_ACCESS))
+        bool is_single_site_config_primitive =
+                ci->type.in(id_BSCAN, id_DCIRESET_DCIRESET, id_DNA_PORT_DNA_PORT, id_EFUSE_USR_EFUSE_USR,
+                            id_ICAP_ICAP, id_FRAME_ECC_FRAME_ECC, id_STARTUP_STARTUP, id_USR_ACCESS_USR_ACCESS);
+        if (is_single_site_config_primitive)
             preplace_unique(ci);
     }
 }
@@ -1237,7 +1254,8 @@ void XC7Packer::constrain_ibufds_gt_site(CellInfo *buf_cell, BelId pad_bel)
     // for the reference clock the board does not drive.
     SiteIndex pad_site;
     for (int32_t i = 0; i < int32_t(sites.ssize()); i++) {
-        if (uarch->get_site_bel(SiteIndex(tile, i), ctx->id("PAD")) == pad_bel) {
+        bool site_holds_this_pad = uarch->get_site_bel(SiteIndex(tile, i), ctx->id("PAD")) == pad_bel;
+        if (site_holds_this_pad) {
             pad_site = SiteIndex(tile, i);
             break;
         }
@@ -1276,7 +1294,8 @@ void XC7Packer::constrain_ibufds_gt_site(CellInfo *buf_cell, BelId pad_bel)
     for (int32_t i = 0; i < int32_t(sites.ssize()); i++) {
         const auto &s = sites[i];
         std::string name = IdString(s.name_prefix).str(ctx);
-        if ((name == "IBUFDS_GTE2") && s.site_x == buf_x && s.site_y == buf_y) {
+        bool is_matching_refclk_buffer = name == "IBUFDS_GTE2" && s.site_x == buf_x && s.site_y == buf_y;
+        if (is_matching_refclk_buffer) {
             buf_site = SiteIndex(tile, i);
             break;
         }
@@ -1299,7 +1318,8 @@ void XC7Packer::constrain_gt(CellInfo *pad_cell, CellInfo *gt_cell)
         log_error("Pad cell %s has not been placed\n", pad_cell->name.c_str(ctx));
 
     if (gt_cell->bel != BelId()) {
-        if (gt_cell->bel.tile != pad_bel.tile) {
+        bool gt_placed_in_another_tile = gt_cell->bel.tile != pad_bel.tile;
+        if (gt_placed_in_another_tile) {
             // A different tile is not automatically a conflict.  A reference
             // clock pad feeds an IBUFDS_GTE2 whose output is distributed to
             // transceivers across the quad, so sgmii_refclk_p legitimately
@@ -1309,7 +1329,8 @@ void XC7Packer::constrain_gt(CellInfo *pad_cell, CellInfo *gt_cell)
             // pad's tile actually offers a site for this cell type, which is
             // the case where the two placements really do disagree.  The
             // unplaced path below already reasons this way.
-            if (get_gt_site(pad_bel, gt_cell->type) == SiteIndex()) {
+            bool pad_tile_has_no_site_for_gt = get_gt_site(pad_bel, gt_cell->type) == SiteIndex();
+            if (pad_tile_has_no_site_for_gt) {
                 log_info("    '%s' takes its reference clock from pad '%s' in another tile; "
                          "keeping its existing placement\n",
                          gt_cell->name.c_str(ctx), pad_cell->name.c_str(ctx));
@@ -1344,8 +1365,10 @@ void XC7Packer::pack_gt()
 
     for (auto &cell : ctx->cells) {
         CellInfo *ci = cell.second.get();
+        bool is_gt_common = ci->type == id_GTPE2_COMMON || ci->type == id_GTXE2_COMMON;
+        bool is_gt_channel = ci->type == id_GTPE2_CHANNEL || ci->type == id_GTXE2_CHANNEL;
 
-        if (ci->type == id_GTPE2_COMMON || ci->type == id_GTXE2_COMMON) {
+        if (is_gt_common) {
             const IdString refclk0_used_attr = ctx->id("_GTREFCLK0_USED"),
                            refclk1_used_attr = ctx->id("_GTREFCLK1_USED");
             bool refclk0_used = false, refclk1_used = false;
@@ -1376,8 +1399,10 @@ void XC7Packer::pack_gt()
                     if (driver == nullptr)
                         log_error("Port %s connected to net %s has no driver!\n", port_name.c_str(),
                                   port_net->name.c_str(ctx));
-                    if (!used || driver->type == id_PSEUDO_GND || driver->type == id_PSEUDO_VCC) {
-                        // refclk input tied to a constant: unused, not a clock
+                    bool refclk_tied_to_constant =
+                            !used || driver->type == id_PSEUDO_GND || driver->type == id_PSEUDO_VCC;
+                    if (refclk_tied_to_constant) {
+                        // unused, not a clock
                         ci->disconnectPort(port.first);
                         continue;
                     }
@@ -1426,7 +1451,7 @@ void XC7Packer::pack_gt()
             for (auto [from, to] : to_rename)
                 ci->renamePort(from, to);
             ci->params[ctx->id("_BOTH_GTREFCLK_USED")] = Property(refclk0_used && refclk1_used);
-        } else if (ci->type == id_GTPE2_CHANNEL || ci->type == id_GTXE2_CHANNEL) {
+        } else if (is_gt_channel) {
             bool is_gtp = ci->type == id_GTPE2_CHANNEL;
             for (auto p : {"CLKRSVD0", "CLKRSVD1", "CPLLLOCKDETCLK", "DMONITORCLK", "DRPCLK", "GTGREFCLK",
                            "PMASCANCLK0", "PMASCANCLK1", "PMASCANCLK2", "PMASCANCLK3", "QPLLLOCKDETCLK", "RXUSRCLK",
@@ -1441,22 +1466,33 @@ void XC7Packer::pack_gt()
                 std::string port_name = port.first.str(ctx);
                 NetInfo *net = ci->getPort(port.first);
 
-                if (net != nullptr && ((boost::starts_with(port_name, "PLL") && boost::ends_with(port_name, "CLK")) ||
-                                       (boost::contains(port_name, "REFCLK") || boost::starts_with(port_name, "QPLL"))) &&
-                    !boost::contains(port_name, "CLKMONITOR") && !boost::contains(port_name, "CLKLOST")) {
-                    if (net->name == ctx->id("$PACKER_GND_NET") || net->name == ctx->id("$PACKER_VCC_NET")) {
+                bool is_pll_clock_port = boost::starts_with(port_name, "PLL") && boost::ends_with(port_name, "CLK");
+                bool is_refclk_or_qpll_port =
+                        boost::contains(port_name, "REFCLK") || boost::starts_with(port_name, "QPLL");
+                bool is_clock_status_port =
+                        boost::contains(port_name, "CLKMONITOR") || boost::contains(port_name, "CLKLOST");
+                bool is_hardwired_clock_input =
+                        net != nullptr && (is_pll_clock_port || is_refclk_or_qpll_port) && !is_clock_status_port;
+                if (is_hardwired_clock_input) {
+                    bool tied_to_constant_net =
+                            net->name == ctx->id("$PACKER_GND_NET") || net->name == ctx->id("$PACKER_VCC_NET");
+                    if (tied_to_constant_net) {
                         ci->disconnectPort(port.first);
                         continue;
                     }
                     CellInfo *driver = net->driver.cell;
-                    if (driver == nullptr || driver->type == id_PSEUDO_GND || driver->type == id_PSEUDO_VCC) {
+                    bool has_no_real_driver =
+                            driver == nullptr || driver->type == id_PSEUDO_GND || driver->type == id_PSEUDO_VCC;
+                    if (has_no_real_driver) {
                         ci->disconnectPort(port.first);
                         continue;
                     }
                     IdString common_type = is_gtp ? id_GTPE2_COMMON : id_GTXE2_COMMON;
                     // GTX CPLL mode: GTXE2_CHANNEL.GTREFCLK* may be driven
                     // directly by IBUFDS_GTE2 (no COMMON in the design)
-                    if (driver->type != common_type && driver->type != id_IBUFDS_GTE2)
+                    bool driven_by_common_or_refclk_buffer =
+                            driver->type == common_type || driver->type == id_IBUFDS_GTE2;
+                    if (!driven_by_common_or_refclk_buffer)
                         log_error("The clock port '%s' of the %s instance %s can only be driven by the clock "
                                   "outputs of a %s or an IBUFDS_GTE2 instance, but not %s\n",
                                   port_name.c_str(), is_gtp ? "GTPE2_CHANNEL" : "GTXE2_CHANNEL",
@@ -1465,7 +1501,9 @@ void XC7Packer::pack_gt()
                         auto drv_port = net->driver.port.str(ctx);
                         auto port_prefix = port_name.substr(0, 4);
                         auto port_suffix = port_name.substr(4);
-                        if (!boost::starts_with(drv_port, port_prefix) || !boost::ends_with(drv_port, port_suffix))
+                        bool driver_port_matches =
+                                boost::starts_with(drv_port, port_prefix) && boost::ends_with(drv_port, port_suffix);
+                        if (!driver_port_matches)
                             log_error("The port %s of a %s instance can only be connected to the port %sOUT%s "
                                       "of a %s instance, but not to %s.\n",
                                       port_name.c_str(), is_gtp ? "GTPE2_CHANNEL" : "GTXE2_CHANNEL",
@@ -1473,14 +1511,17 @@ void XC7Packer::pack_gt()
                                       drv_port.c_str());
                     }
                     bool used = net->name != ctx->id("$PACKER_VCC_NET") && net->name != ctx->id("$PACKER_GND_NET");
-                    if (used && port_name == "GTREFCLK0")
+                    bool refclk0_used = used && port_name == "GTREFCLK0";
+                    bool refclk1_used = used && port_name == "GTREFCLK1";
+                    if (refclk0_used)
                         ci->params[ctx->id("_GTREFCLK0_USED")] = Property(1, 1);
-                    if (used && port_name == "GTREFCLK1")
+                    if (refclk1_used)
                         ci->params[ctx->id("_GTREFCLK1_USED")] = Property(1, 1);
                     // hardwired; disconnect
                     ci->disconnectPort(port.first);
                 }
-                if (boost::contains(port_name, "[") && boost::contains(port_name, "]")) {
+                bool port_name_has_brackets = boost::contains(port_name, "[") && boost::contains(port_name, "]");
+                if (port_name_has_brackets) {
                     std::string new_port_name = port_name;
                     boost::replace_all(new_port_name, "[", "");
                     boost::replace_all(new_port_name, "]", "");

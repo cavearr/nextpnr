@@ -570,8 +570,10 @@ void XilinxPacker::constrain_srl_cascades()
             continue;
         srls.push_back(ci);
         NetInfo *q31 = ci->getPort(id_MC31);
-        if (q31 != nullptr && q31->users.entries() == 1 && (*q31->users.begin()).port == id_DI1 &&
-            is_srl32((*q31->users.begin()).cell)) {
+        bool q31_cascades_into_next_srl = q31 != nullptr && q31->users.entries() == 1 &&
+                                          (*q31->users.begin()).port == id_DI1 &&
+                                          is_srl32((*q31->users.begin()).cell);
+        if (q31_cascades_into_next_srl) {
             next_srl[ci] = (*q31->users.begin()).cell;
             prev_srl[(*q31->users.begin()).cell] = ci;
         }
@@ -634,7 +636,8 @@ void XilinxPacker::constrain_srl_cascades()
     // the fabric, and any of them may -- break the cycle at an arbitrary
     // element and cluster the rest as one open chain.
     for (auto ci : srls) {
-        if (visited.count(ci) || !next_srl.count(ci))
+        bool in_unvisited_cycle = !visited.count(ci) && next_srl.count(ci);
+        if (!in_unvisited_cycle)
             continue;
         log_warning("SRL cell '%s' is part of a pure Q31 cascade cycle; breaking the cycle at its Q31 link\n",
                     ci->name.c_str(ctx));
@@ -648,9 +651,11 @@ void XilinxPacker::constrain_srl_cascades()
     // above: multi-fanout Q31, a non-SRL consumer, or a group boundary.
     for (auto ci : srls) {
         NetInfo *q31 = ci->getPort(id_MC31);
-        if (q31 == nullptr || next_srl.count(ci))
+        bool q31_leaves_slice = q31 != nullptr && !next_srl.count(ci);
+        if (!q31_leaves_slice)
             continue;
-        if (std::find(offslice.begin(), offslice.end(), ci) == offslice.end())
+        bool not_yet_listed = std::find(offslice.begin(), offslice.end(), ci) == offslice.end();
+        if (not_yet_listed)
             offslice.push_back(ci);
     }
 
@@ -664,7 +669,8 @@ void XilinxPacker::constrain_srl_cascades()
             continue;
         }
         NetInfo *q = ci->getPort(id_O6);
-        if (q != nullptr && !q->users.empty()) {
+        bool q_output_is_used = q != nullptr && !q->users.empty();
+        if (q_output_is_used) {
             if (reads_bit31(ci)) {
                 // Q already reads bit 31, so it carries the very value Q31
                 // does: fold the off-slice Q31 consumers into the Q net.
@@ -703,7 +709,8 @@ void XilinxPacker::constrain_srl_cascades()
         }
         rewired++;
     }
-    if (clusters || rewired)
+    bool anything_changed = clusters || rewired;
+    if (anything_changed)
         log_info("Constrained %d SRL cascade group(s) into single slices, moved %d Q31 link(s) to Q[31]\n", clusters,
                  rewired);
 }
@@ -888,12 +895,14 @@ void XC7Packer::pack_bram()
     int casc_seen = 0, casc_dropped = 0, casc_bram = 0;
     for (auto &cell : ctx->cells) {
         CellInfo *ci = cell.second.get();
-        if (ci->type != id_RAMB18E1 && ci->type != id_RAMB36E1)
+        bool is_bram = ci->type == id_RAMB18E1 || ci->type == id_RAMB36E1;
+        if (!is_bram)
             continue;
         ++casc_bram;
         for (auto &pin : {std::make_pair("CASCADEINA", "A_INPUT"),
                           std::make_pair("CASCADEINB", "B_INPUT")}) {
-            if (str_or_default(ci->params, ctx->id(pin.second), "DIRECT") == "CASCADE")
+            bool port_uses_cascade = str_or_default(ci->params, ctx->id(pin.second), "DIRECT") == "CASCADE";
+            if (port_uses_cascade)
                 continue;
             NetInfo *n = ci->getPort(ctx->id(pin.first));
             if (n == nullptr)
@@ -905,8 +914,9 @@ void XC7Packer::pack_bram()
             // only a constant tie: a real cascade net is left alone
             // The constant network's drivers are PSEUDO_VCC/PSEUDO_GND at this
             // point, not VCC/GND -- checking the latter matched nothing.
-            if (n->driver.cell != nullptr && n->driver.cell->type != id_PSEUDO_VCC &&
-                n->driver.cell->type != id_PSEUDO_GND)
+            bool driven_by_logic = n->driver.cell != nullptr && n->driver.cell->type != id_PSEUDO_VCC &&
+                                   n->driver.cell->type != id_PSEUDO_GND;
+            if (driven_by_logic)
                 continue;
             ci->disconnectPort(ctx->id(pin.first));
             ++casc_dropped;
@@ -1066,7 +1076,8 @@ void XilinxPacker::pack_inverters()
             continue;
         for (IdString pin : {id_RST, id_PWRDWN, id_CLKINSEL}) {
             NetInfo *n = ci->getPort(pin);
-            if (n == nullptr || n->driver.cell == nullptr)
+            bool pin_is_driven = n != nullptr && n->driver.cell != nullptr;
+            if (!pin_is_driven)
                 continue;
             CellInfo *drv = n->driver.cell;
             if (drv->type != id_INV)

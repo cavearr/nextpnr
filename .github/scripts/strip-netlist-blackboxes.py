@@ -23,7 +23,8 @@ while frontier:
     used.add(name)
     for cell in mods.get(name, {}).get("cells", {}).values():
         t = cell["type"]
-        if t in mods and t not in seen:
+        is_unvisited_module = t in mods and t not in seen
+        if is_unvisited_module:
             used.add(t)
             frontier.append(t)
 

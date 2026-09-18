@@ -63,8 +63,9 @@ bool XilinxImpl::xc7_logic_tile_valid(IdString tile_type, const LogicTileStatus 
         for (int i = 0; i < 8; i++) {
             auto l6 = get_tags(lts.cells[(i << 4) | BEL_6LUT]);
             auto l5 = get_tags(lts.cells[(i << 4) | BEL_5LUT]);
-            if ((l6 != nullptr && (l6->lut.is_memory || l6->lut.is_srl)) ||
-                (l5 != nullptr && (l5->lut.is_memory || l5->lut.is_srl)))
+            bool l6_needs_slicem = l6 != nullptr && (l6->lut.is_memory || l6->lut.is_srl);
+            bool l5_needs_slicem = l5 != nullptr && (l5->lut.is_memory || l5->lut.is_srl);
+            if (l6_needs_slicem || l5_needs_slicem)
                 return false;
         }
     }
@@ -87,9 +88,12 @@ bool XilinxImpl::xc7_logic_tile_valid(IdString tile_type, const LogicTileStatus 
         auto l5 = get_tags(l5c);
         if (l5 == nullptr)
             continue;
-        if (l5->lut.is_memory || l5->lut.is_srl)
+        bool is_memory_or_srl = l5->lut.is_memory || l5->lut.is_srl;
+        if (is_memory_or_srl)
             continue;
-        if (l5->lut.input_count > 5 || l5->lut.output_count == 2 || l5c->getPort(id_A6) != nullptr)
+        bool needs_a6_or_second_output =
+                l5->lut.input_count > 5 || l5->lut.output_count == 2 || l5c->getPort(id_A6) != nullptr;
+        if (needs_a6_or_second_output)
             return false;
     }
     // Per-position site-exit (OUTMUX) budget, run UNCONDITIONALLY.  Each
@@ -115,15 +119,12 @@ bool XilinxImpl::xc7_logic_tile_valid(IdString tile_type, const LogicTileStatus 
             auto ff1_tags = get_tags(ff1c), ff2_tags = get_tags(ff2c);
             // in-position sinks that do NOT need the OUTMUX
             auto is_local_sink = [&](const PortRef &usr, NetInfo *net) {
-                if (ff1c != nullptr && usr.cell == ff1c && ff1_tags->ff.d == net)
-                    return true; // main FF via xFFMUX
-                if (ff2c != nullptr && usr.cell == ff2c && ff2_tags->ff.d == net)
-                    return true; // 5FF via xFF5MUX
-                if (cy != nullptr && usr.cell == cy)
-                    return true; // carry S/DI/CIN feed
-                if ((l6c != nullptr && usr.cell == l6c) || (l5c != nullptr && usr.cell == l5c))
-                    return true; // intra-position feed (routethru cases)
-                return false;
+                bool feeds_main_ff = ff1c != nullptr && usr.cell == ff1c && ff1_tags->ff.d == net; // via xFFMUX
+                bool feeds_5ff = ff2c != nullptr && usr.cell == ff2c && ff2_tags->ff.d == net;     // via xFF5MUX
+                bool feeds_carry = cy != nullptr && usr.cell == cy;                                 // S/DI/CIN
+                bool feeds_lut_in_position = (l6c != nullptr && usr.cell == l6c) ||
+                                             (l5c != nullptr && usr.cell == l5c); // routethru cases
+                return feeds_main_ff || feeds_5ff || feeds_carry || feeds_lut_in_position;
             };
             auto has_external_user = [&](NetInfo *net) {
                 if (net == nullptr)
@@ -136,11 +137,13 @@ bool XilinxImpl::xc7_logic_tile_valid(IdString tile_type, const LogicTileStatus 
             int claims = 0;
             // O5 of a used 5LUT (O6 has its own pin; DI feed-throughs and
             // in-position FF feeds are local)
-            if (l5c != nullptr && l5_tags != nullptr && !l5_tags->lut.only_drives_carry &&
-                !l5_tags->lut.is_memory && !l5_tags->lut.is_srl &&
-                has_external_user(l5_tags->lut.output_sigs[0]))
+            bool is_plain_5lut = l5c != nullptr && l5_tags != nullptr && !l5_tags->lut.only_drives_carry &&
+                                 !l5_tags->lut.is_memory && !l5_tags->lut.is_srl;
+            bool o5_leaves_position = is_plain_5lut && has_external_user(l5_tags->lut.output_sigs[0]);
+            if (o5_leaves_position)
                 claims++;
-            if (cy != nullptr && cy_tags != nullptr) {
+            bool has_carry = cy != nullptr && cy_tags != nullptr;
+            if (has_carry) {
                 // carry sum O_k beyond the in-position FF
                 if (has_external_user(cy_tags->carry.out_sigs[k]))
                     claims++;
@@ -163,10 +166,12 @@ bool XilinxImpl::xc7_logic_tile_valid(IdString tile_type, const LogicTileStatus 
             // 5FF Q has no dedicated pin: fabric consumers go through OUTMUX
             if (ff2c != nullptr) {
                 NetInfo *q2 = ff2c->getPort(id_Q);
-                if (q2 != nullptr && !q2->users.empty())
+                bool ff5_q_is_used = q2 != nullptr && !q2->users.empty();
+                if (ff5_q_is_used)
                     claims++;
             }
-            if (claims > 1) {
+            bool outmux_oversubscribed = claims > 1;
+            if (outmux_oversubscribed) {
                 DBG();
                 return false;
             }
@@ -212,12 +217,15 @@ bool XilinxImpl::xc7_logic_tile_valid(IdString tile_type, const LogicTileStatus 
                     // slot routinely).  (Port of nextpnr-xilinx.)
                     bool srl_pair = lut6->lut.is_srl && lut5->lut.is_srl;
                     // If all 6 inputs or 2 outputs are used, 5LUT can't also be present
-                    if (!srl_pair && (lut6->lut.input_count == 6 || lut6->lut.output_count == 2)) {
+                    bool lut6_uses_whole_lut = lut6->lut.input_count == 6 || lut6->lut.output_count == 2;
+                    bool lut6_excludes_lut5 = !srl_pair && lut6_uses_whole_lut;
+                    if (lut6_excludes_lut5) {
                         DBG();
                         return false;
                     }
                     // If more than 5 total inputs are used, need to check number of shared input
-                    if (!srl_pair && ((lut6->lut.input_count + lut5->lut.input_count) > 5)) {
+                    bool must_share_inputs = !srl_pair && (lut6->lut.input_count + lut5->lut.input_count) > 5;
+                    if (must_share_inputs) {
                         int shared = 0, need_shared = (lut6->lut.input_count + lut5->lut.input_count - 5);
                         for (int j = 0; j < lut6->lut.input_count; j++) {
                             for (int k = 0; k < lut5->lut.input_count; k++) {
@@ -308,10 +316,14 @@ bool XilinxImpl::xc7_logic_tile_valid(IdString tile_type, const LogicTileStatus 
                 // the XOR/CY xFFMUX paths.  The position check matters: an FF
                 // fed by another position's carry output must NOT pass as
                 // "direct" here, because position A's FFMUX cannot see O3.
-                if ((drv.cell == lts.cells[(i << 4) | BEL_6LUT] && drv.port != id_MC31) ||
-                    drv.cell == lts.cells[(i << 4) | BEL_5LUT] || drv.cell == out_fmux_cell ||
-                    ((carry4 && drv.cell == carry4_cell &&
-                      (carry4->carry.out_sigs[i % 4] == ff1->ff.d || carry4->carry.cout_sigs[i % 4] == ff1->ff.d)))) {
+                bool driven_by_this_slice_carry = carry4 && drv.cell == carry4_cell;
+                bool driven_by_own_position_carry =
+                        driven_by_this_slice_carry &&
+                        (carry4->carry.out_sigs[i % 4] == ff1->ff.d || carry4->carry.cout_sigs[i % 4] == ff1->ff.d);
+                bool ff1_fed_directly = (drv.cell == lts.cells[(i << 4) | BEL_6LUT] && drv.port != id_MC31) ||
+                                        drv.cell == lts.cells[(i << 4) | BEL_5LUT] || drv.cell == out_fmux_cell ||
+                                        driven_by_own_position_carry;
+                if (ff1_fed_directly) {
                     // Direct, OK
                 } else {
                     // With the direct feeds excluded, a carry driver can only
@@ -323,7 +335,7 @@ bool XilinxImpl::xc7_logic_tile_valid(IdString tile_type, const LogicTileStatus 
                     // ("Failed to route arc ... CARRY4_O2 to AFFMUX_OUT").
                     // Flat reject; the FF is placeable in any OTHER slice via
                     // a normal fabric route.  (Port of nextpnr-xilinx.)
-                    if (carry4 && drv.cell == carry4_cell) {
+                    if (driven_by_this_slice_carry) {
                         DBG();
                         return false;
                     }
@@ -344,6 +356,7 @@ bool XilinxImpl::xc7_logic_tile_valid(IdString tile_type, const LogicTileStatus 
                 auto &drv = ff2->ff.d->driver;
                 CellInfo *carry4_cell = lts.cells[((i / 4) << 6) | BEL_CARRY4];
                 // The 5FF's only X-free feed is its own position's O5
+                bool driven_by_this_slice_carry = carry4 && drv.cell == carry4_cell;
                 if (drv.cell == lts.cells[(i << 4) | BEL_5LUT]) {
                     // Direct, OK
                 } else {
@@ -352,7 +365,7 @@ bool XilinxImpl::xc7_logic_tile_valid(IdString tile_type, const LogicTileStatus 
                     // via X it would need the same exit-and-reenter the router
                     // does not model.  Flat reject (same class as the main-FF
                     // case above).  (Port of nextpnr-xilinx.)
-                    if (carry4 && drv.cell == carry4_cell) {
+                    if (driven_by_this_slice_carry) {
                         DBG();
                         return false;
                     }
@@ -373,7 +386,8 @@ bool XilinxImpl::xc7_logic_tile_valid(IdString tile_type, const LogicTileStatus 
             // floating (observed via physical sim: the bypass-fed AFF's D = X,
             // corrupting an LFSR).  Forbid that co-pack so the placer
             // separates the two FFs.  (Port of nextpnr-xilinx.)
-            if (ff1_uses_x && ff2 != nullptr) {
+            bool bypass_fed_ff_shares_with_5ff = ff1_uses_x && ff2 != nullptr;
+            if (bypass_fed_ff_shares_with_5ff) {
                 DBG();
                 return false;
             }
@@ -420,10 +434,12 @@ bool XilinxImpl::xc7_logic_tile_valid(IdString tile_type, const LogicTileStatus 
             // CO3 leaves on the dedicated COUT->CIN spine, so only its
             // non-CIN users count; CO0..CO2 can only reach the fabric
             // through the output mux at all.  (Port of nextpnr-xilinx.)
-            if (carry4 != nullptr && carry4->carry.cout_sigs[i % 4] != nullptr) {
+            bool carry_co_is_used = carry4 != nullptr && carry4->carry.cout_sigs[i % 4] != nullptr;
+            if (carry_co_is_used) {
                 NetInfo *co = carry4->carry.cout_sigs[i % 4];
                 bool co_uses_mux = false;
-                if ((i % 4) == 3) {
+                bool co_is_chain_output = (i % 4) == 3;
+                if (co_is_chain_output) {
                     for (auto &usr : co->users)
                         if (usr.port != id_CIN)
                             co_uses_mux = true;

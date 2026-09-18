@@ -257,17 +257,20 @@ void XilinxImpl::update_bram_bel(BelId bel, CellInfo *cell)
         tts.bts = std::make_unique<BRAMTileStatus>();
     Loc loc = ctx->getBelLocation(bel);
     int z = loc.z;
-    if (z >= 12) {
+    bool is_site_variant_bel = z >= 12;
+    if (is_site_variant_bel) {
         // A bel imported by a non-primary site variant (given a fresh unique z
         // by the chipdb generator) is the same physical hardware as its
         // primary twin: fold it into the primary slot so the BRAM tile status
         // keeps its compact z-indexed layout.
         bool found = false;
         for (auto other : ctx->getBelsByTile(loc.x, loc.y)) {
-            if (other == bel || ctx->getBelType(other) != type)
+            bool is_other_bel_of_same_type = other != bel && ctx->getBelType(other) == type;
+            if (!is_other_bel_of_same_type)
                 continue;
             int oz = ctx->getBelLocation(other).z;
-            if (oz >= 12)
+            bool other_is_also_variant = oz >= 12;
+            if (other_is_also_variant)
                 continue;
             if (bel_name_in_site(other) != bel_name_in_site(bel))
                 continue;
@@ -327,8 +330,10 @@ if (cell.second->type.in(id_BUFR, id_BUFR_BUFR)) {
         if (!design_has_bufr) {
             IdString dst = IdString(chip_tile_info(ctx->chip_info, pip.tile).wires[pip_data.dst_wire].name);
             const std::string &d = dst.str(ctx);
-            if (d.find("CK_BUFRCLK") != std::string::npos || d.find("RCLK_BEFORE_DIV") != std::string::npos ||
-                d.find("RCLK_OUT") != std::string::npos || d.find("RCLK2RCLK") != std::string::npos)
+            bool drives_bufr_clock_path =
+                    d.find("CK_BUFRCLK") != std::string::npos || d.find("RCLK_BEFORE_DIV") != std::string::npos ||
+                    d.find("RCLK_OUT") != std::string::npos || d.find("RCLK2RCLK") != std::string::npos;
+            if (drives_bufr_clock_path)
                 return true;
         }
         IdString tt = IdString(chip_tile_info(ctx->chip_info, pip.tile).type_name);
@@ -340,7 +345,8 @@ if (cell.second->type.in(id_BUFR, id_BUFR_BUFR)) {
             const auto &tile_data = chip_tile_info(ctx->chip_info, pip.tile);
             for (int32_t i = 0; i < tile_data.bels.ssize(); ++i) {
                 CellInfo *bound = ctx->getBoundBelCell(BelId(pip.tile, i));
-                if (bound != nullptr && bound->type == id_BUFGCTRL) {
+                bool is_bound_bufgctrl = bound != nullptr && bound->type == id_BUFGCTRL;
+                if (is_bound_bufgctrl) {
                     has_bound_bufgctrl = true;
                     break;
                 }
@@ -366,7 +372,9 @@ if (cell.second->type.in(id_BUFR, id_BUFR_BUFR)) {
     // The pseudo-pip table is the exception: those pips carry hand-written fasm
     // in fasm.cc and are emittable despite having no database entry, so the
     // router must still be allowed to use them.
-    if (pip_type == PIP_TILE_ROUTING && (uint32_t(extra_data.pip_config) & PIP_CFG_NO_BITS)) {
+    bool routing_pip_without_bits =
+            pip_type == PIP_TILE_ROUTING && (uint32_t(extra_data.pip_config) & PIP_CFG_NO_BITS);
+    if (routing_pip_without_bits) {
         if (!pseudo_pip_keys_valid) {
             xlnx_build_pseudo_pip_config(ctx, pseudo_pip_config);
             pseudo_pip_keys_valid = true;
@@ -382,17 +390,21 @@ if (cell.second->type.in(id_BUFR, id_BUFR_BUFR)) {
         // VCC -> DSP48.OPMODE*INV_OUT routing outright.)
         std::string tts = tt.str(ctx);
         bool writer_emits_nothing = false;
-        if (tts == "DSP_L" || tts == "DSP_R") {
+        bool is_dsp_tile = tts == "DSP_L" || tts == "DSP_R";
+        bool is_sing_ioi3_tile = tts == "RIOI3_SING" || tts == "LIOI3_SING" || tts == "RIOI_SING";
+        if (is_dsp_tile) {
             // fasm.cc: "FIXME: PPIPs missing for DSPs" -- whole tile skipped
             writer_emits_nothing = true;
-        } else if (tts == "RIOI3_SING" || tts == "LIOI3_SING" || tts == "RIOI_SING") {
+        } else if (is_sing_ioi3_tile) {
             // fasm.cc: "FIXME: PPIPs missing for SING IOI3s"
             std::string sn = src.str(ctx), dn = dst.str(ctx);
-            if ((sn.find("IMUX") != std::string::npos || sn.find("CTRL0") != std::string::npos) &&
-                dn.find("CLK") == std::string::npos)
-                writer_emits_nothing = true;
+            bool from_imux_or_ctrl = sn.find("IMUX") != std::string::npos || sn.find("CTRL0") != std::string::npos;
+            bool to_clock_wire = dn.find("CLK") != std::string::npos;
+            writer_emits_nothing = from_imux_or_ctrl && !to_clock_wire;
         }
-        if (!writer_emits_nothing && !pseudo_pip_config.count(PseudoPipKey{tt, dst, src}))
+        bool has_pseudo_pip_fasm = pseudo_pip_config.count(PseudoPipKey{tt, dst, src});
+        bool pip_is_unprogrammable = !writer_emits_nothing && !has_pseudo_pip_fasm;
+        if (pip_is_unprogrammable)
             return true;
     }
     if (pip_type == PIP_SITE_ENTRY) {
@@ -473,7 +485,8 @@ void XilinxImpl::apply_loc_constraints()
         // for the name of one of those walks off the end of the array.
         SiteIndex si = get_bel_site(bel);
         const auto &sites = tile_extra_data(si.tile)->sites;
-        if (si.site < 0 || si.site >= int32_t(sites.ssize()))
+        bool bel_in_enumerated_site = si.site >= 0 && si.site < int32_t(sites.ssize());
+        if (!bel_in_enumerated_site)
             continue;
         IdString site = get_site_name(si);
         site_seen[site]++;
@@ -504,7 +517,8 @@ void XilinxImpl::apply_loc_constraints()
         // site form belongs to this pass, and a site name always carries its
         // coordinates.
         auto xpos = loc_str.rfind("_X");
-        if (xpos == std::string::npos || loc_str.find('Y', xpos) == std::string::npos)
+        bool loc_names_a_site = xpos != std::string::npos && loc_str.find('Y', xpos) != std::string::npos;
+        if (!loc_names_a_site)
             continue;
         IdString site = ctx->id(loc_str);
         if (!site_seen.count(site))
@@ -517,9 +531,11 @@ void XilinxImpl::apply_loc_constraints()
         wanted.emplace_back(ci, found->second);
     }
 
-    for (auto &w : wanted)
-        if (w.first->bel != BelId() && w.first->bel != w.second)
+    for (auto &w : wanted) {
+        bool bound_to_wrong_bel = w.first->bel != BelId() && w.first->bel != w.second;
+        if (bound_to_wrong_bel)
             ctx->unbindBel(w.first->bel);
+    }
     // A wanted bel can still be occupied by a cell nobody constrained, because
     // packing put it there before any of this ran.  A LOC is a requirement,
     // not a preference, so the squatter yields and the placer finds it
@@ -528,7 +544,8 @@ void XilinxImpl::apply_loc_constraints()
         if (ctx->checkBelAvail(w.second))
             continue;
         CellInfo *sitting = ctx->getBoundBelCell(w.second);
-        if (sitting == nullptr || sitting == w.first)
+        bool occupied_by_another_cell = sitting != nullptr && sitting != w.first;
+        if (!occupied_by_another_cell)
             continue;
         if (sitting->attrs.count(id_LOC))
             continue;   // both constrained here: reported as a conflict below
@@ -1061,7 +1078,8 @@ delay_t XilinxImpl::estimateDelay(WireId src, WireId dst) const
     // the same hop, neither of which a separable linear formula can express.
     delay_t base;
     delay_t measured = delay_matrix_lookup(dx - sx, dy - sy);
-    if (measured >= 0) {
+    bool have_measured_delay = measured >= 0;
+    if (have_measured_delay) {
         base = measured; // in or out of window -- extrapolated when out
     } else {
         // No measured matrix at all: the tuned formula from nextpnr-xilinx.
@@ -1072,9 +1090,10 @@ delay_t XilinxImpl::estimateDelay(WireId src, WireId dst) const
     }
     if (fnd_snk != sink_locs.end())
         base += 1000;
-    if (src_type == id_NODE_PINFEED && dx == sx && dy == sy)
+    bool same_tile = dx == sx && dy == sy;
+    if (src_type == id_NODE_PINFEED && same_tile)
         base -= 200;
-    else if (src_type.in(id_NODE_LOCAL, id_NODE_PINBOUNCE) && dx == sx && dy == sy)
+    else if (src_type.in(id_NODE_LOCAL, id_NODE_PINBOUNCE) && same_tile)
         base -= 100;
     if (src_type == id_NODE_CLE_OUTPUT)
         base -= 80;
@@ -1083,7 +1102,8 @@ delay_t XilinxImpl::estimateDelay(WireId src, WireId dst) const
 
 delay_t XilinxImpl::predictDelay(BelId src_bel, IdString src_pin, BelId dst_bel, IdString dst_pin) const
 {
-    if (src_bel == BelId() || dst_bel == BelId())
+    bool both_bels_known = src_bel != BelId() && dst_bel != BelId();
+    if (!both_bels_known)
         return 0;
     int sx, sy, dx, dy;
     tile_xy(ctx->chip_info, src_bel.tile, sx, sy);
@@ -1097,15 +1117,18 @@ delay_t XilinxImpl::predictDelay(BelId src_bel, IdString src_pin, BelId dst_bel,
     // Tuned predict-delay ported from nextpnr-xilinx arch.cc
     if (src_bel.tile == dst_bel.tile) {
         Loc dl = ctx->getBelLocation(src_bel), sl = ctx->getBelLocation(dst_bel);
-        if ((dl.z >> 4) == (sl.z >> 4))
+        bool same_slice = (dl.z >> 4) == (sl.z >> 4);
+        bool source_is_ff2 = (dl.z & 0xF) == BEL_FF2;
+        if (same_slice)
             return 0;
-        else if ((dl.z & 0xF) == BEL_FF2)
+        else if (source_is_ff2)
             return 700; // penalize FF2 as it makes routing harder
         else
             return 150;
     }
     delay_t measured = delay_matrix_lookup(dx - sx, dy - sy);
-    if (measured >= 0)
+    bool have_measured_delay = measured >= 0;
+    if (have_measured_delay)
         return measured; // in or out of window -- extrapolated when out
     int dist_x = std::abs(dx - sx), dist_y = std::abs(dy - sy);
     delay_t base = 30 * std::min(dist_x, 18) + 10 * std::max(dist_x - 18, 0) + 60 * std::min(dist_y, 6) +

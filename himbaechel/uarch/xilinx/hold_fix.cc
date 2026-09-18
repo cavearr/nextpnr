@@ -71,7 +71,8 @@ static void wire_xy(Context *ctx, WireId w, int &x, int &y)
 // false, so the caller can fall back to a feedthrough buffer.
 static bool detour_arc(Context *ctx, NetInfo *net, WireId sink_wire, delay_t extra_delay)
 {
-    if (sink_wire == WireId() || !net->wires.count(sink_wire))
+    bool sink_is_routed = sink_wire != WireId() && net->wires.count(sink_wire);
+    if (!sink_is_routed)
         return false;
 
     // Fan-out count of each wire in the net's routing tree.
@@ -90,7 +91,8 @@ static bool detour_arc(Context *ctx, NetInfo *net, WireId sink_wire, delay_t ext
     delay_t branch_delay = 0;
     for (int guard = 0; guard < 100000; guard++) {
         auto it = net->wires.find(cur);
-        if (it == net->wires.end() || it->second.pip == PipId()) {
+        bool reached_net_source = it == net->wires.end() || it->second.pip == PipId();
+        if (reached_net_source) {
             branch = cur;
             break;
         }
@@ -99,13 +101,15 @@ static bool detour_arc(Context *ctx, NetInfo *net, WireId sink_wire, delay_t ext
         priv_pips.push_back(pip);
         branch_delay += ctx->getPipDelay(pip).maxDelay();
         WireId parent = ctx->getPipSrcWire(pip);
-        if (child_count.at(parent) > 1) {
+        bool parent_is_branch_point = child_count.at(parent) > 1;
+        if (parent_is_branch_point) {
             branch = parent;
             break;
         }
         cur = parent;
     }
-    if (branch == WireId() || priv.empty())
+    bool found_private_branch = branch != WireId() && !priv.empty();
+    if (!found_private_branch)
         return false;
     delay_t target = branch_delay + extra_delay;
 
@@ -144,15 +148,18 @@ static bool detour_arc(Context *ctx, NetInfo *net, WireId sink_wire, delay_t ext
     while (!pq.empty()) {
         QE e = pq.top();
         pq.pop();
-        if (e.d > distT.at(e.w))
+        bool stale_queue_entry = e.d > distT.at(e.w);
+        if (stale_queue_entry)
             continue;
         for (PipId up : ctx->getPipsUphill(e.w)) {
             WireId s = ctx->getPipSrcWire(up);
-            if (!usable(s) || !in_box(s))
+            bool candidate_wire = usable(s) && in_box(s);
+            if (!candidate_wire)
                 continue;
             delay_t nd = e.d + ctx->getPipDelay(up).maxDelay();
             auto it = distT.find(s);
-            if (it == distT.end() || nd < it->second) {
+            bool shorter_path_to_sink = it == distT.end() || nd < it->second;
+            if (shorter_path_to_sink) {
                 distT[s] = nd;
                 next_pip[s] = up; // downhill pip s -> e.w
                 pq.push({nd, s});
@@ -184,14 +191,16 @@ static bool detour_arc(Context *ctx, NetInfo *net, WireId sink_wire, delay_t ext
     cur = branch;
     delay_t acc = 0;
     for (int guard = 0; guard < 100000 && cur != sink_wire; guard++) {
-        if (acc + distT.at(cur) >= target)
-            break; // enough delay banked; take the shortest tail below
+        bool enough_delay_banked = acc + distT.at(cur) >= target;
+        if (enough_delay_banked)
+            break; // take the shortest tail below
         PipId best;
         WireId best_w;
         delay_t best_score = std::numeric_limits<delay_t>::min();
         for (PipId dh : ctx->getPipsDownhill(cur)) {
             WireId n = ctx->getPipDstWire(dh);
-            if (used.count(n) || !distT.count(n) || !usable(n))
+            bool can_extend_path = !used.count(n) && distT.count(n) && usable(n);
+            if (!can_extend_path)
                 continue;
             delay_t total = acc + ctx->getPipDelay(dh).maxDelay() + distT.at(n);
             // Prefer the largest total not exceeding target; penalise overshoot.
@@ -218,7 +227,8 @@ static bool detour_arc(Context *ctx, NetInfo *net, WireId sink_wire, delay_t ext
         acc += ctx->getPipDelay(it->second).maxDelay();
         cur = ctx->getPipDstWire(it->second);
     }
-    if (cur != sink_wire) {
+    bool detour_reached_sink = cur == sink_wire;
+    if (!detour_reached_sink) {
         rollback();
         return false;
     }
@@ -228,7 +238,8 @@ static bool detour_arc(Context *ctx, NetInfo *net, WireId sink_wire, delay_t ext
     std::vector<PipId> bound;
     for (PipId p : path) {
         WireId d = ctx->getPipDstWire(p);
-        if (ctx->getBoundWireNet(d) != nullptr) {
+        bool wire_taken_since_search = ctx->getBoundWireNet(d) != nullptr;
+        if (wire_taken_since_search) {
             for (int i = int(bound.size()) - 1; i >= 0; i--)
                 ctx->unbindPip(bound[i]);
             rollback();
@@ -247,13 +258,15 @@ static bool detour_arc(Context *ctx, NetInfo *net, WireId sink_wire, delay_t ext
 static BelId place_hold_buffer(XilinxImpl *impl, Context *ctx, CellInfo *buf, Loc origin)
 {
     auto try_tile = [&](int x, int y) -> BelId {
-        if (x < 0 || y < 0 || x >= ctx->getGridDimX() || y >= ctx->getGridDimY())
+        bool tile_on_grid = x >= 0 && y >= 0 && x < ctx->getGridDimX() && y < ctx->getGridDimY();
+        if (!tile_on_grid)
             return BelId();
         for (BelId bel : ctx->getBelsByTile(x, y)) {
             if (ctx->getBelType(bel) != id_SLICE_LUTX)
                 continue;
             Loc l = ctx->getBelLocation(bel);
-            if ((l.z & 0xF) != BEL_6LUT)
+            bool is_6lut_bel = (l.z & 0xF) == BEL_6LUT;
+            if (!is_6lut_bel)
                 continue;
             if (!ctx->checkBelAvail(bel))
                 continue;
@@ -268,7 +281,9 @@ static BelId place_hold_buffer(XilinxImpl *impl, Context *ctx, CellInfo *buf, Lo
             bool tile_free = true;
             for (BelId b2 : ctx->getBelsByTile(x, y)) {
                 IdString bt = ctx->getBelType(b2);
-                if ((bt == id_SLICE_LUTX || bt == id_SLICE_FFX) && !ctx->checkBelAvail(b2)) {
+                bool is_slice_bel = bt == id_SLICE_LUTX || bt == id_SLICE_FFX;
+                bool slice_bel_occupied = is_slice_bel && !ctx->checkBelAvail(b2);
+                if (slice_bel_occupied) {
                     tile_free = false;
                     break;
                 }
@@ -397,15 +412,19 @@ void XilinxImpl::fixup_hold()
         std::vector<Target> ft;
         int detoured = 0;
         for (const auto &t : targets) {
-            if (!ctx->nets.count(t.net) || !ctx->cells.count(t.sink_cell))
+            bool target_still_exists = ctx->nets.count(t.net) && ctx->cells.count(t.sink_cell);
+            if (!target_still_exists)
                 continue;
             NetInfo *net = ctx->nets.at(t.net).get();
             CellInfo *sink = ctx->cells.at(t.sink_cell).get();
-            if (net->driver.cell == nullptr || sink->bel == BelId())
+            bool driven_and_placed = net->driver.cell != nullptr && sink->bel != BelId();
+            if (!driven_and_placed)
                 continue;
-            if (sink->getPort(t.sink_port) != net) // stale report vs current netlist
+            bool stale_report = sink->getPort(t.sink_port) != net; // report vs current netlist
+            if (stale_report)
                 continue;
-            if (t.extra <= detour_max) {
+            bool small_enough_to_detour = t.extra <= detour_max;
+            if (small_enough_to_detour) {
                 PortRef pr;
                 pr.cell = sink;
                 pr.port = t.sink_port;
@@ -440,7 +459,8 @@ void XilinxImpl::fixup_hold()
             CellInfo *sink = ctx->cells.at(t.sink_cell).get();
             if (sink->bel == BelId())
                 continue;
-            if (sink->getPort(t.sink_port) != net) // stale report vs current netlist
+            bool stale_report = sink->getPort(t.sink_port) != net; // report vs current netlist
+            if (stale_report)
                 continue;
 
             NetInfo *buf_out = ctx->createNet(ctx->idf("%s$holdbuf%d$net", net->name.c_str(ctx), total_buffers));
@@ -543,11 +563,13 @@ void XilinxImpl::fixup_hold()
         total_detours += detoured;
         log_info("Hold-fix pass %d: %d detour(s), %d feedthrough buffer(s); %zu hold violation(s) remain.\n", pass,
                  detoured, placed, ctx->timing_result.min_delay_violations.size());
-        if (detoured == 0 && placed == 0)
+        bool pass_changed_nothing = detoured == 0 && placed == 0;
+        if (pass_changed_nothing)
             break;
     }
 
-    if (total_detours > 0 || total_buffers > 0) {
+    bool anything_was_fixed = total_detours > 0 || total_buffers > 0;
+    if (anything_was_fixed) {
         log_info("Hold-fix: %d detour(s) + %d feedthrough buffer(s) total; %zu hold violation(s) remain.\n",
                  total_detours, total_buffers, ctx->timing_result.min_delay_violations.size());
 

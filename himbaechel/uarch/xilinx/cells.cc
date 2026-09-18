@@ -35,6 +35,9 @@ CellInfo *XilinxPacker::create_cell(IdString type, IdString name)
         cell->ports[id].name = id;
         cell->ports[id].type = dir;
     };
+    // IBUFGDS: legacy clock-capable spelling of IBUFDS; same primitive on
+    // 7-series, handled as an alias (port of nextpnr-xilinx #74)
+    bool is_differential_input_buffer = type == id_IBUFDS || type == id_IBUFGDS;
     if (type == id_SLICE_LUTX) {
         for (int i = 1; i <= 6; i++)
             add_port("A" + std::to_string(i), PORT_IN);
@@ -156,9 +159,7 @@ CellInfo *XilinxPacker::create_cell(IdString type, IdString name)
         add_port("IBUFDISABLE", PORT_IN);
         add_port("INTERMDISABLE", PORT_IN);
         add_port("O", PORT_OUT);
-    } else if (type == id_IBUFDS || type == id_IBUFGDS) {
-        // IBUFGDS: legacy clock-capable spelling of IBUFDS; same primitive on
-        // 7-series, handled as an alias (port of nextpnr-xilinx #74)
+    } else if (is_differential_input_buffer) {
         add_port("I", PORT_IN);
         add_port("IB", PORT_IN);
         add_port("O", PORT_OUT);

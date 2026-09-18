@@ -97,7 +97,8 @@ void XilinxImpl::parse_xdc(const std::string &filename)
     // a port.  Strip a trailing "[0]" so the lookup can retry.
     //  (Port of nextpnr-xilinx b257be4d.)
     auto debus_zero = [](const std::string &str) {
-        if (str.size() > 3 && str.compare(str.size() - 3, 3, "[0]") == 0)
+        bool ends_with_bit_zero = str.size() > 3 && str.compare(str.size() - 3, 3, "[0]") == 0;
+        if (ends_with_bit_zero)
             return str.substr(0, str.size() - 3);
         return std::string();
     };
@@ -113,7 +114,8 @@ void XilinxImpl::parse_xdc(const std::string &filename)
         // get_cells names a cell outright, which is how a design pins a hard
         // block -- an MMCM, a clock buffer, a transceiver -- to the site that
         // is known to work for it.
-        if (split.front() != "get_ports" && split.front() != "get_cells")
+        bool is_supported_selector = split.front() == "get_ports" || split.front() == "get_cells";
+        if (!is_supported_selector)
             log_error("targets other than 'get_ports' or 'get_cells' are not supported (on line %d)\n", lineno);
         if (split.size() < 2)
             log_error("failed to parse target (on line %d)\n", lineno);
@@ -134,7 +136,8 @@ void XilinxImpl::parse_xdc(const std::string &filename)
                 num_errors++;
                 return tgt_cells;
             }
-            if ((cursor + 1) != int(split.size())) {
+            bool single_name_follows_options = (cursor + 1) == int(split.size());
+            if (!single_name_follows_options) {
                 log_nonfatal_error("unsupported get_cells selector form '%s' (on line %d)\n", str.c_str(), lineno);
                 num_errors++;
                 return tgt_cells;
@@ -146,7 +149,8 @@ void XilinxImpl::parse_xdc(const std::string &filename)
         IdString cellname = ctx->id(target_name);
         if (!ctx->cells.count(cellname)) {
             std::string base = debus_zero(target_name);
-            if (!base.empty() && ctx->cells.count(ctx->id(base)))
+            bool debussed_name_exists = !base.empty() && ctx->cells.count(ctx->id(base));
+            if (debussed_name_exists)
                 cellname = ctx->id(base);
         }
         if (ctx->cells.count(cellname))
@@ -338,13 +342,17 @@ void XilinxImpl::parse_xdc(const std::string &filename)
                 // simple '*' wildcard match
                 size_t n = 0, p = 0, star = std::string::npos, mark = 0;
                 while (n < name.size()) {
-                    if (p < pat.size() && (pat[p] == name[n] || pat[p] == '?')) {
+                    bool pattern_remaining = p < pat.size();
+                    bool pattern_char_matches = pattern_remaining && (pat[p] == name[n] || pat[p] == '?');
+                    bool pattern_at_star = pattern_remaining && pat[p] == '*';
+                    bool can_backtrack_to_star = star != std::string::npos;
+                    if (pattern_char_matches) {
                         ++n;
                         ++p;
-                    } else if (p < pat.size() && pat[p] == '*') {
+                    } else if (pattern_at_star) {
                         star = p++;
                         mark = n;
-                    } else if (star != std::string::npos) {
+                    } else if (can_backtrack_to_star) {
                         p = star + 1;
                         n = ++mark;
                     } else
@@ -359,15 +367,17 @@ void XilinxImpl::parse_xdc(const std::string &filename)
             std::string to_sel;
             for (int c = 1; c < int(arguments.size()); c++) {
                 const std::string &a = arguments.at(c);
+                bool to_option_with_value = a == "-to" && c + 1 < int(arguments.size());
+                bool is_cycle_count = !a.empty() && std::all_of(a.begin(), a.end(), ::isdigit);
                 if (a == "-hold")
                     is_hold = true;
-                else if (a == "-to" && c + 1 < int(arguments.size()))
+                else if (to_option_with_value)
                     to_sel = arguments.at(++c);
                 else if (a == "-from") {
                     log_warning("ignoring unsupported XDC option '-from' in set_multicycle_path (on line %d)\n", lineno);
                     goto nextline;
                 }
-                else if (!a.empty() && std::all_of(a.begin(), a.end(), ::isdigit))
+                else if (is_cycle_count)
                     mcp = std::stoi(a);
             }
             // extract the NAME glob from the -to selector (substring after "=~")
@@ -377,13 +387,16 @@ void XilinxImpl::parse_xdc(const std::string &filename)
                 to_pat = to_sel.substr(eq + 2);
             auto clean = [](std::string s) {
                 std::string o;
-                for (char ch : s)
-                    if (ch != '{' && ch != '}' && ch != ']' && ch != '[' && !std::isspace(ch))
+                for (char ch : s) {
+                    bool is_tcl_punctuation = ch == '{' || ch == '}' || ch == ']' || ch == '[' || std::isspace(ch);
+                    if (!is_tcl_punctuation)
                         o += ch;
+                }
                 return o;
             };
             to_pat = clean(to_pat);
-            if (!is_hold && !to_pat.empty()) {
+            bool tags_setup_endpoints = !is_hold && !to_pat.empty();
+            if (tags_setup_endpoints) {
                 int tagged = 0;
                 for (auto &kv : ctx->cells) {
                     std::string cn = kv.first.str(ctx);
@@ -407,7 +420,8 @@ void XilinxImpl::parse_xdc(const std::string &filename)
         log_nonfatal_error("unexpected end of XDC file\n");
         num_errors++;
     }
-    if (missing_targets > 0 && ctx->verbose)
+    bool report_missing_targets = missing_targets > 0 && ctx->verbose;
+    if (report_missing_targets)
         log_info("%d XDC constraint target(s) reference ports or nets that are not in this design and were "
                  "ignored (a board-level XDC normally constrains more pins than a design uses)\n",
                  missing_targets);

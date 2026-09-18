@@ -506,10 +506,12 @@ struct Router2
         // router has no other reason to move.  Inactive unless the pass is
         // running, so the normal route is bit-for-bit unchanged.
         float smooth_cost = 1.0f;
-        if (smoothing_active && smooth_target > 0 && pip != PipId()) {
+        bool smoothing_prices_this_pip = smoothing_active && smooth_target > 0 && pip != PipId();
+        if (smoothing_prices_this_pip) {
             Loc pl = ctx->getPipLocation(pip);
             auto it = tile_occ.find(tile_key(pl.x, pl.y));
-            if (it != tile_occ.end() && it->second > smooth_target)
+            bool pip_tile_is_hot = it != tile_occ.end() && it->second > smooth_target;
+            if (pip_tile_is_hot)
                 smooth_cost = 1.0f + cfg.smooth_weight *
                                      (float(it->second - smooth_target) / float(smooth_target));
         }
@@ -1335,7 +1337,8 @@ struct Router2
         for (int n : failed_nets) {
             auto &net_data = nets.at(n);
             ++net_data.fail_count;
-            if ((net_data.fail_count % 3) == 0) {
+            bool third_consecutive_failure = (net_data.fail_count % 3) == 0;
+            if (third_consecutive_failure) {
                 // Every three times a net fails to route, expand the bounding box to increase the search space.
                 //
                 // Unbounded, this is one tile per side every third overused
@@ -1351,6 +1354,7 @@ struct Router2
                 // wider box in that regime is more room to make a worse
                 // choice.  So with bbExpandMax set, stop growing after that
                 // many expansions.
+                bool bb_expansion_allowed = cfg.bb_expand_max == 0 || net_data.bb_expansions < cfg.bb_expand_max;
                 if (cfg.bb_budget) {
                     // The box is rebuilt from criticality every iteration, so
                     // growing it here would be overwritten; accumulate the
@@ -1360,7 +1364,7 @@ struct Router2
                     int cap = cfg.bb_expand_max > 0 ? cfg.bb_expand_max : 12;
                     if (net_data.bb_expansions < cap)
                         ++net_data.bb_expansions;
-                } else if (cfg.bb_expand_max == 0 || net_data.bb_expansions < cfg.bb_expand_max) {
+                } else if (bb_expansion_allowed) {
                     ctx->expandBoundingBox(net_data.bb);
                     ++net_data.bb_expansions;
                 }
@@ -1372,10 +1376,12 @@ struct Router2
         // later it searches close to home first rather than across the device.
         // Only with bbExpandMax set or in budget mode, so the default path is
         // untouched.
-        if (cfg.bb_expand_max > 0 || cfg.bb_budget) {
+        bool reset_bb_after_clean_route = cfg.bb_expand_max > 0 || cfg.bb_budget;
+        if (reset_bb_after_clean_route) {
             for (size_t i = 0; i < nets.size(); i++) {
                 auto &nd = nets.at(i);
-                if (nd.fail_count == 0 || failed_nets.count(int(i)))
+                bool net_did_not_just_recover = nd.fail_count == 0 || failed_nets.count(int(i));
+                if (net_did_not_just_recover)
                     continue;
                 nd.fail_count = 0;
                 nd.bb_expansions = 0;
@@ -1911,10 +1917,26 @@ struct Router2
                 continue;
             Loc pl = ctx->getPipLocation(pip);
             auto it = tile_occ.find(tile_key(pl.x, pl.y));
-            if (it != tile_occ.end() && it->second > smooth_target)
+            bool pip_tile_is_hot = it != tile_occ.end() && it->second > smooth_target;
+            if (pip_tile_is_hot)
                 ++hot;
         }
         return hot;
+    }
+
+    // Is this net driven by a clock buffer or clock generator?  Such nets
+    // reach their sinks over dedicated global routing that route_net() cannot
+    // rebuild, so smoothing must leave them alone.
+    bool driven_by_clock_resource(const NetInfo *n) const
+    {
+        bool driver_is_placed = n->driver.cell != nullptr && n->driver.cell->bel != BelId();
+        if (!driver_is_placed)
+            return false;
+        std::string bt = ctx->getBelType(n->driver.cell->bel).str(ctx);
+        for (const char *clock_bel : {"BUFG", "BUFH", "BUFR", "BUFIO", "MMCM", "PLL"})
+            if (bt.find(clock_bel) != std::string::npos)
+                return true;
+        return false;
     }
 
     dict<int, NetRouteSnapshot> snapshot_all()
@@ -2013,20 +2035,18 @@ struct Router2
                 // and criticality does not flag clocks either, so the test is
                 // the driver's bel type.  That is the whole of it: fanout is
                 // NOT a proxy for this -- see smoothMaxFanout.
-                if (int(n->users.entries()) > cfg.smooth_max_fanout)
+                bool fanout_too_high = int(n->users.entries()) > cfg.smooth_max_fanout;
+                if (fanout_too_high)
                     continue;
                 // Driven by a clock buffer?  Then it reaches its sinks over
                 // dedicated global routing.  Fanout does not identify these --
                 // the johnson example's clock has 25 sinks and still cannot be
                 // rebuilt by route_net() -- so test the driver directly.
-                if (n->driver.cell != nullptr && n->driver.cell->bel != BelId()) {
-                    std::string bt = ctx->getBelType(n->driver.cell->bel).str(ctx);
-                    if (bt.find("BUFG") != std::string::npos || bt.find("BUFH") != std::string::npos ||
-                        bt.find("BUFR") != std::string::npos || bt.find("BUFIO") != std::string::npos ||
-                        bt.find("MMCM") != std::string::npos || bt.find("PLL") != std::string::npos)
-                        continue;
-                }
-                if (nd.max_crit >= cfg.smooth_max_crit)
+                bool is_clock_net = driven_by_clock_resource(n);
+                if (is_clock_net)
+                    continue;
+                bool too_critical_to_move = nd.max_crit >= cfg.smooth_max_crit;
+                if (too_critical_to_move)
                     continue;
                 // Trivial local nets are not worth a search.  A net held in
                 // a handful of pips is an intra-slice hop -- a flip-flop
@@ -2034,7 +2054,8 @@ struct Router2
                 // occupies no interconnect, so there is no density to move:
                 //   Failed to route arc 0.0 of net 'core.prbs[19]',
                 //   from SLICE_X1Y0.A5FF_Q to SLICE_X1Y0.A4
-                if (int(nd.wires.size()) < cfg.smooth_min_wires)
+                bool too_small_to_move = int(nd.wires.size()) < cfg.smooth_min_wires;
+                if (too_small_to_move)
                     continue;
                 int hot = net_hot_pips(nd);
                 if (hot > 0)
@@ -2070,20 +2091,17 @@ struct Router2
                     if (here == 0)
                         continue;
                     n_pips += here;
-                    bool clockish = false;
-                    if (n->driver.cell != nullptr && n->driver.cell->bel != BelId()) {
-                        std::string bt = ctx->getBelType(n->driver.cell->bel).str(ctx);
-                        clockish = bt.find("BUFG") != std::string::npos || bt.find("BUFH") != std::string::npos ||
-                                   bt.find("BUFR") != std::string::npos || bt.find("BUFIO") != std::string::npos ||
-                                   bt.find("MMCM") != std::string::npos || bt.find("PLL") != std::string::npos;
-                    }
+                    bool clockish = driven_by_clock_resource(n);
+                    bool fanout_too_high = int(n->users.entries()) > cfg.smooth_max_fanout;
+                    bool too_critical_to_move = nd2.max_crit >= cfg.smooth_max_crit;
+                    bool too_small_to_move = int(nd2.wires.size()) < cfg.smooth_min_wires;
                     if (clockish)
                         n_clock += here;
-                    else if (int(n->users.entries()) > cfg.smooth_max_fanout)
+                    else if (fanout_too_high)
                         n_fanout += here;
-                    else if (nd2.max_crit >= cfg.smooth_max_crit)
+                    else if (too_critical_to_move)
                         n_crit += here;
-                    else if (int(nd2.wires.size()) < cfg.smooth_min_wires)
+                    else if (too_small_to_move)
                         n_small += here;
                     else
                         n_eligible += here;
@@ -2136,7 +2154,8 @@ struct Router2
                         if (ad.at(j).pre_routed)
                             continue;
                         WireId sink = ad.at(j).sink_wire;
-                        if (nd.src_wire == WireId() || sink == WireId())
+                        bool arc_has_no_endpoints = nd.src_wire == WireId() || sink == WireId();
+                        if (arc_has_no_endpoints)
                             continue;
                         // Leave arcs that stay inside one tile alone: a
                         // flip-flop output back into a LUT input in the same
@@ -2149,7 +2168,8 @@ struct Router2
                         // each wire is in, which answers it exactly.
                         const auto &swd = wire_data(nd.src_wire);
                         const auto &dwd = wire_data(sink);
-                        if (swd.x == dwd.x && swd.y == dwd.y)
+                        bool arc_stays_in_one_tile = swd.x == dwd.x && swd.y == dwd.y;
+                        if (arc_stays_in_one_tile)
                             continue;
                         ripup_arc(net, usr.index, j);
                     }
@@ -2173,7 +2193,8 @@ struct Router2
                     ++unroutable;
                     continue;
                 }
-                if (net_hot_pips(nd) > hot_before) {
+                bool reroute_made_hot_tiles_worse = net_hot_pips(nd) > hot_before;
+                if (reroute_made_hot_tiles_worse) {
                     restore_net(net, snap);
                     ++rejected;
                     continue;
@@ -2202,7 +2223,8 @@ struct Router2
                      "%d pips%s\n",
                      round, rerouted, rejected, unroutable, m2, cfg.smooth_percentile * 100, p2, x2, int(t2),
                      overused_wires ? " (OVERUSE REMAINS)" : "");
-            if (p2 >= p95) {
+            bool percentile_did_not_improve = p2 >= p95;
+            if (percentile_did_not_improve) {
                 if (++stagnant > cfg.smooth_stagnant)
                     break; // no longer improving
             } else {
@@ -2216,7 +2238,8 @@ struct Router2
         // the routing incomplete with no loop left to repair it -- revert the
         // whole pass instead.
         failed_nets.clear();
-        if (!bind_and_check_all() || !failed_nets.empty()) {
+        bool arch_refused_binding = !bind_and_check_all() || !failed_nets.empty();
+        if (arch_refused_binding) {
             log_info("    smoothing: the arch would not bind the smoothed result, reverting\n");
             restore_all(all_snap);
             failed_nets.clear();

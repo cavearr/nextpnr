@@ -138,7 +138,8 @@ void XC7Packer::bypass_pll_input_buffers()
             continue;
         for (IdString port : {id_CLKIN1, id_CLKIN2}) {
             NetInfo *ref = ci->getPort(port);
-            if (ref == nullptr || ref->driver.cell == nullptr)
+            bool reference_is_driven = ref != nullptr && ref->driver.cell != nullptr;
+            if (!reference_is_driven)
                 continue;
             CellInfo *buf = ref->driver.cell;
             if (!gbufs.count(buf->type))
@@ -147,12 +148,14 @@ void XC7Packer::bypass_pll_input_buffers()
             NetInfo *src = buf->getPort(id_I);
             if (src == nullptr)
                 src = buf->getPort(id_I0);
-            if (src == nullptr || src->driver.cell == nullptr)
+            bool buffer_input_is_driven = src != nullptr && src->driver.cell != nullptr;
+            if (!buffer_input_is_driven)
                 continue;
             if (!pads.count(src->driver.cell->type))
                 continue;
 
-            if (buf->attrs.count(id_LOC) || buf->attrs.count(id_BEL) || buf->bel != BelId())
+            bool buffer_is_constrained = buf->attrs.count(id_LOC) || buf->attrs.count(id_BEL) || buf->bel != BelId();
+            if (buffer_is_constrained)
                 continue;
 
             ci->disconnectPort(port);
@@ -187,6 +190,7 @@ void XC7Packer::prepare_clocking()
 
     for (auto &cell : ctx->cells) {
         CellInfo *ci = cell.second.get();
+        bool is_horizontal_clock_buffer = ci->type == id_BUFH || ci->type == id_BUFHCE;
         if (upgrade.count(ci->type)) {
             IdString new_type = upgrade.at(ci->type);
             ci->type = new_type;
@@ -204,11 +208,12 @@ void XC7Packer::prepare_clocking()
             tie_port(ci, "S0", true, true);
             tie_port(ci, "S1", false, true);
             tie_port(ci, "IGNORE0", true, true);
-        } else if (ci->type == id_BUFH || ci->type == id_BUFHCE) {
+        } else if (is_horizontal_clock_buffer) {
             // BUFH is the legacy non-CE spelling; both map to the BUFHCE bel
             // with CE tied active (port of nextpnr-xilinx pack_clocking_xc7.cc)
             ci->type = id_BUFHCE_BUFHCE;
-            if (ci->ports.count(id_CE) && ci->getPort(id_CE) != nullptr)
+            bool ce_is_connected = ci->ports.count(id_CE) && ci->getPort(id_CE) != nullptr;
+            if (ce_is_connected)
                 ci->disconnectPort(id_CE);
             tie_port(ci, "CE", true, true);
         } else if (ci->type == id_BUFR) {
@@ -314,14 +319,17 @@ void XilinxImpl::route_clocks()
             continue;
 
         // check if we have a global clock net, skip otherwise
+        bool driven_by_bufr = clk_net->driver.cell->type == id_BUFR_BUFR && clk_net->driver.port == id_O;
+        bool feeds_only_a_bufr = clk_net->users.entries() == 1 &&
+                                 (*clk_net->users.begin()).cell->type == id_BUFR_BUFR &&
+                                 (*clk_net->users.begin()).port == id_I;
         bool is_global = false;
         if ((clk_net->driver.cell->type.in(id_BUFGCTRL, id_BUFCE_BUFG_PS, id_BUFCE_BUFCE, id_BUFGCE_DIV_BUFGCE_DIV)) &&
             clk_net->driver.port == id_O)
             is_global = true;
-        else if (clk_net->driver.cell->type == id_BUFR_BUFR && clk_net->driver.port == id_O)
+        else if (driven_by_bufr)
             is_global = true;
-        else if (clk_net->users.entries() == 1 && (*clk_net->users.begin()).cell->type == id_BUFR_BUFR &&
-                 (*clk_net->users.begin()).port == id_I)
+        else if (feeds_only_a_bufr)
             is_global = true;
         else if (clk_net->driver.cell->type.in(id_PLLE2_ADV_PLLE2_ADV, id_MMCME2_ADV_MMCME2_ADV) &&
                  clk_net->users.entries() == 1 &&

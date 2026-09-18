@@ -78,26 +78,32 @@ int XilinxImpl::measure_from(WireId src, int sx, int sy, std::vector<delay_t> &o
         auto qw = queue.top();
         queue.pop();
         auto found = best.find(qw.wire);
-        if (found == best.end() || found->second < qw.delay)
-            continue; // stale heap entry
+        bool stale_heap_entry = found == best.end() || found->second < qw.delay;
+        if (stale_heap_entry)
+            continue;
         if (++popped > dm_max_explore)
             break;
 
         int wx, wy;
         tile_xy(ctx->chip_info, qw.wire.tile, wx, wy);
         int dx = wx - sx, dy = wy - sy;
-        if (std::abs(dx) > margin || std::abs(dy) > margin)
-            continue; // outside the window, don't expand
+        bool outside_search_window = std::abs(dx) > margin || std::abs(dy) > margin;
+        if (outside_search_window)
+            continue; // don't expand
 
         // Reaching a logic-tile input pin is what we are timing: the pin
         // access is part of the cost, the same way it is for a real arc.
-        if (std::abs(dx) <= span && std::abs(dy) <= span) {
+        bool inside_matrix = std::abs(dx) <= span && std::abs(dy) <= span;
+        if (inside_matrix) {
             for (auto bp : ctx->getWireBelPins(qw.wire)) {
-                if (!is_logic_tile(bp.bel) || ctx->getBelPinType(bp.bel, bp.pin) != PORT_IN)
+                bool is_logic_input_pin = is_logic_tile(bp.bel) && ctx->getBelPinType(bp.bel, bp.pin) == PORT_IN;
+                if (!is_logic_input_pin)
                     continue;
                 size_t idx = dm_index(dx, dy);
-                if (out.at(idx) < 0 || qw.delay < out.at(idx)) {
-                    if (out.at(idx) < 0)
+                bool entry_unmeasured = out.at(idx) < 0;
+                bool faster_than_recorded = entry_unmeasured || qw.delay < out.at(idx);
+                if (faster_than_recorded) {
+                    if (entry_unmeasured)
                         ++filled;
                     out.at(idx) = qw.delay;
                 }
@@ -109,7 +115,8 @@ int XilinxImpl::measure_from(WireId src, int sx, int sy, std::vector<delay_t> &o
             WireId dst = ctx->getPipDstWire(pip);
             delay_t nd = qw.delay + ctx->getPipDelay(pip).maxDelay();
             auto prev = best.find(dst);
-            if (prev != best.end() && prev->second <= nd)
+            bool already_reached_as_fast = prev != best.end() && prev->second <= nd;
+            if (already_reached_as_fast)
                 continue;
             best[dst] = nd;
             queue.push(QueuedWire{dst, nd});
@@ -195,7 +202,8 @@ void XilinxImpl::build_delay_matrix()
     std::string cache = ctx->settings.count(ctx->id("xilinx/delayMatrixFile"))
                                 ? ctx->settings.at(ctx->id("xilinx/delayMatrixFile")).as_string()
                                 : std::string();
-    if (!cache.empty() && load_delay_matrix(cache))
+    bool loaded_from_cache = !cache.empty() && load_delay_matrix(cache);
+    if (loaded_from_cache)
         return;
 
     int side = 2 * dm_window + 1;
@@ -259,8 +267,9 @@ void XilinxImpl::build_delay_matrix()
                     int n = 0;
                     for (int yy = std::max(-dm_window, y - r); yy <= std::min(dm_window, y + r); yy++)
                         for (int xx = std::max(-dm_window, x - r); xx <= std::min(dm_window, x + r); xx++) {
-                            if (std::abs(xx - x) != r && std::abs(yy - y) != r)
-                                continue; // ring only
+                            bool on_ring = std::abs(xx - x) == r || std::abs(yy - y) == r;
+                            if (!on_ring)
+                                continue;
                             delay_t v = dm_delay.at(dm_index(xx, yy));
                             if (v >= 0) {
                                 acc_d += v;
@@ -305,13 +314,15 @@ void XilinxImpl::compute_edge_rates()
     for (int y = -dm_window; y <= dm_window; y++) {
         delay_t outer = dm_delay.at(dm_index(dm_window, y));
         delay_t inner = dm_delay.at(dm_index(dm_window - band, y));
-        if (outer >= 0 && inner >= 0) {
+        bool both_measured = outer >= 0 && inner >= 0;
+        if (both_measured) {
             sx += double(outer - inner) / band;
             ++nx;
         }
         delay_t outer_n = dm_delay.at(dm_index(-dm_window, y));
         delay_t inner_n = dm_delay.at(dm_index(-(dm_window - band), y));
-        if (outer_n >= 0 && inner_n >= 0) {
+        bool both_measured_n = outer_n >= 0 && inner_n >= 0;
+        if (both_measured_n) {
             sx += double(outer_n - inner_n) / band;
             ++nx;
         }
@@ -319,13 +330,15 @@ void XilinxImpl::compute_edge_rates()
     for (int x = -dm_window; x <= dm_window; x++) {
         delay_t outer = dm_delay.at(dm_index(x, dm_window));
         delay_t inner = dm_delay.at(dm_index(x, dm_window - band));
-        if (outer >= 0 && inner >= 0) {
+        bool both_measured = outer >= 0 && inner >= 0;
+        if (both_measured) {
             sy += double(outer - inner) / band;
             ++ny;
         }
         delay_t outer_n = dm_delay.at(dm_index(x, -dm_window));
         delay_t inner_n = dm_delay.at(dm_index(x, -(dm_window - band)));
-        if (outer_n >= 0 && inner_n >= 0) {
+        bool both_measured_n = outer_n >= 0 && inner_n >= 0;
+        if (both_measured_n) {
             sy += double(outer_n - inner_n) / band;
             ++ny;
         }
@@ -360,7 +373,8 @@ bool XilinxImpl::load_delay_matrix(const std::string &path)
     if (!in)
         return false;
     int window = 0;
-    if (!(in >> window) || window <= 0)
+    bool window_is_valid = (in >> window) && window > 0;
+    if (!window_is_valid)
         return false;
     int side = 2 * window + 1;
     std::vector<delay_t> vals;

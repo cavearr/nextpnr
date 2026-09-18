@@ -286,7 +286,8 @@ struct FasmBackend
     {
         for (auto &cell : ctx->cells) {
             CellInfo *ci = cell.second.get();
-            if (ci->type == id_BUFGCTRL && ci->bel != BelId()) {
+            bool is_placed_bufgctrl = ci->type == id_BUFGCTRL && ci->bel != BelId();
+            if (is_placed_bufgctrl) {
                 SiteIndex site = uarch->get_bel_site(ci->bel);
                 auto rel = uarch->rel_site_loc(site);
                 bufgctrl_bound_slots.insert({site.tile, rel.y});
@@ -415,7 +416,8 @@ struct FasmBackend
             // tile.  (Port of nextpnr-xilinx, task #47.)
             bool tile_is_clk_bufg_r =
                     (boost::starts_with(tile_name, "CLK_BUFG_TOP_R") || boost::starts_with(tile_name, "CLK_BUFG_BOT_R"));
-            if (tile_is_clk_bufg_r && !bufgctrl_tile_guard(pip.tile))
+            bool bufg_tile_has_no_bound_bufgctrl = tile_is_clk_bufg_r && !bufgctrl_tile_guard(pip.tile);
+            if (bufg_tile_has_no_bound_bufgctrl)
                 return;
             for (auto c : pp) {
                 // The OMUX bypass and a bound output register are mutually
@@ -428,8 +430,9 @@ struct FasmBackend
                 // write_io runs before write_routing, so the set is populated.
                 if (boost::contains(c, ".OMUX.")) {
                     auto dot = c.find('.');
-                    if (dot != std::string::npos &&
-                        ologic_registered.count(tile_name + "/" + c.substr(0, dot)))
+                    bool site_has_output_register =
+                            dot != std::string::npos && ologic_registered.count(tile_name + "/" + c.substr(0, dot));
+                    if (site_has_output_register)
                         continue;
                 }
                 if (boost::starts_with(tile_name, "RIOI3_SING") || boost::starts_with(tile_name, "LIOI3_SING") ||
@@ -457,7 +460,8 @@ struct FasmBackend
                     } catch (...) {
                         slot = -1;
                     }
-                    if (slot >= 0 && !bufgctrl_bound_slots.count({pip.tile, slot}))
+                    bool slot_has_no_bound_bufgctrl = slot >= 0 && !bufgctrl_bound_slots.count({pip.tile, slot});
+                    if (slot_has_no_bound_bufgctrl)
                         continue;
                 }
                 out << tile_name << "." << c << std::endl;
@@ -480,10 +484,11 @@ struct FasmBackend
             // PIPs).  Both classes program the unused-slot BUFGCTRL site;
             // the cell-config + routing pair together is what kills the
             // clock distribution on hardware.  (Port of nextpnr-xilinx.)
-            if (boost::starts_with(tile_name, "CLK_BUFG_TOP_R") || boost::starts_with(tile_name, "CLK_BUFG_BOT_R")) {
-                if (!bufgctrl_tile_guard(pip.tile))
-                    return;
-            }
+            bool tile_is_clk_bufg_r =
+                    boost::starts_with(tile_name, "CLK_BUFG_TOP_R") || boost::starts_with(tile_name, "CLK_BUFG_BOT_R");
+            bool bufg_tile_has_no_bound_bufgctrl = tile_is_clk_bufg_r && !bufgctrl_tile_guard(pip.tile);
+            if (bufg_tile_has_no_bound_bufgctrl)
+                return;
 
             if (boost::starts_with(tile_name, "DSP_L") || boost::starts_with(tile_name, "DSP_R")) {
                 // FIXME: PPIPs missing for DSPs
@@ -646,7 +651,8 @@ struct FasmBackend
                     // Emitting the bare site-wire name (e.g. BMC31) makes
                     // fasm2frames reject the feature.  (Port of
                     // nextpnr-xilinx fasm.cc.)
-                    if (pinname != std::string(1, belname[0]) + "I") {
+                    bool uses_cascade_leg = pinname != std::string(1, belname[0]) + "I";
+                    if (uses_cascade_leg) {
                         switch (belname[0]) {
                         case 'A':
                             pinname = "BDI1_BMC31";
@@ -998,7 +1004,8 @@ struct FasmBackend
                 if (other == pad->bel)
                     continue;
                 CellInfo *oc = ctx->getBoundBelCell(other);
-                if (oc != nullptr && oc->type == id_PAD)
+                bool partner_holds_pad = oc != nullptr && oc->type == id_PAD;
+                if (partner_holds_pad)
                     return false;
             }
             return true;
@@ -1014,7 +1021,8 @@ struct FasmBackend
                 if (other == pad->bel)
                     continue;
                 CellInfo *oc = ctx->getBoundBelCell(other);
-                if (oc == nullptr || oc->type != id_PAD)
+                bool partner_holds_pad = oc != nullptr && oc->type == id_PAD;
+                if (!partner_holds_pad)
                     continue;
                 NetInfo *on = oc->getPort(id_PAD);
                 if (on == nullptr)
@@ -1071,6 +1079,7 @@ struct FasmBackend
         // were all written against this convention and only fire under it.
         auto yLoc = is_sing ? (is_top_sing ? 1 : 0) : (1 - ioLoc.y);
         push("IOB_Y" + std::to_string(yLoc));
+        bool is_master_half = yLoc == 0;
 
         bool has_diff_prefix = boost::starts_with(iostandard, "DIFF_");
         bool is_tmds33 = iostandard == "TMDS_33";
@@ -1082,7 +1091,8 @@ struct FasmBackend
             iostandard.erase(0, 5);
         bool is_sstl = iostandard == "SSTL12" || iostandard == "SSTL135" || iostandard == "SSTL15";
 
-        if (is_riob18 && is_input && is_diff && yLoc == 0)
+        bool is_right_hp_diff_input_master = is_riob18 && is_input && is_diff && is_master_half;
+        if (is_right_hp_diff_input_master)
             write_bit("IBUFDS_BANK_GLUE");
 
         int hclk = uarch->hclk_for_iob(pad->bel);
@@ -1099,13 +1109,16 @@ struct FasmBackend
             int default_drive = (is_hp_bank && iostandard == "LVCMOS12") ? 8 : 12;
             int drive = int_or_default(pad->attrs, id_DRIVE, default_drive);
 
-            if ((iostandard == "LVCMOS33" || iostandard == "LVTTL") && is_hp_bank)
+            bool is_3v3_standard = iostandard == "LVCMOS33" || iostandard == "LVTTL";
+            bool hp_bank_given_3v3_standard = is_3v3_standard && is_hp_bank;
+            if (hp_bank_given_3v3_standard)
                 log_error("high performance banks (RIOB18) do not support IO standard %s\n", iostandard.c_str());
 
+            bool is_lvcmos15_or_18 = iostandard == "LVCMOS18" || iostandard == "LVCMOS15";
             if (iostandard == "SSTL135")
                 write_bit("SSTL135.DRIVE.I_FIXED");
             else if (is_hp_bank) {
-                if ((iostandard == "LVCMOS18" || iostandard == "LVCMOS15")) {
+                if (is_lvcmos15_or_18) {
                     write_bit("LVCMOS15_LVCMOS18.DRIVE.I12_I16_I2_I4_I6_I8");
                     // Drive strength is encoded by which of several
                     // overlapping feature bits are set, not by one bit per
@@ -1113,7 +1126,8 @@ struct FasmBackend
                     // narrows to 12 or 8 only when this one joins it.  The
                     // branch that writes it lived in the non-HP chain below,
                     // so an HP-bank pad silently got some other strength.
-                    if (iostandard == "LVCMOS18" && (drive == 12 || drive == 8) && !is_sing)
+                    bool lvcmos18_drive_12_or_8 = iostandard == "LVCMOS18" && (drive == 12 || drive == 8);
+                    if (lvcmos18_drive_12_or_8 && !is_sing)
                         write_bit("LVCMOS18.DRIVE.I12_I8");
                 }
                 else if (iostandard == "LVCMOS12")
@@ -1168,7 +1182,8 @@ struct FasmBackend
                 write_bit(iostandard + ".IN_USE");
 
             // SLEW
-            if (is_hp_bank && slew == "SLOW") {
+            bool hp_bank_slow_slew = is_hp_bank && slew == "SLOW";
+            if (hp_bank_slow_slew) {
                 if (!is_sing) {
                     if (iostandard == "SSTL135")
                         write_bit("SSTL135.SLEW.SLOW");
@@ -1203,7 +1218,8 @@ struct FasmBackend
             // driven LIOB18 output half.  SING tiles are included: their own
             // segbits_liob18_sing.db defines IOB_Y{0,1}.OBUF_HP_BANK_GLUE, so
             // the earlier !is_sing skip dropped a real, expressible bit.
-            if (is_liob18 && !is_diff)
+            bool is_left_hp_single_ended = is_liob18 && !is_diff;
+            if (is_left_hp_single_ended)
                 write_bit("OBUF_HP_BANK_GLUE");
         }
 
@@ -1211,7 +1227,9 @@ struct FasmBackend
         // it takes the bank's slew and stepdown and is pulled down, Vivado's
         // default for an unused pin.  This is the output-side mirror of the
         // partner-half block in the input path below.
-        if (is_output && is_liob18 && !is_diff && !is_sing && partner_pad_unused()) {
+        bool is_left_hp_single_ended_output = is_output && is_liob18 && !is_diff && !is_sing;
+        bool describe_unused_partner_of_output = is_left_hp_single_ended_output && partner_pad_unused();
+        if (describe_unused_partner_of_output) {
             std::string saved = fasm_ctx.back();
             fasm_ctx.back() = "IOB_Y" + std::to_string(1 - yLoc);
             write_bit("LVCMOS12_LVCMOS15_LVCMOS18_LVCMOS25_LVCMOS33_LVTTL_SSTL135_SSTL15.SLEW.SLOW");
@@ -1241,7 +1259,8 @@ struct FasmBackend
             //
             // The SING tile type has none of these keys -- only `.IN` --
             // hence the guard against it.
-            if (is_liob18 && !is_output && !is_diff && !is_sing) {
+            bool is_left_hp_single_ended_input_only = is_liob18 && !is_output && !is_diff && !is_sing;
+            if (is_left_hp_single_ended_input_only) {
                 write_bit("LVCMOS12_LVCMOS15_LVCMOS18_LVCMOS25_LVCMOS33_LVTTL_SSTL135_SSTL15.SLEW.SLOW");
                 write_bit("LVCMOS12_LVCMOS15_LVCMOS18.SLEW.SLOW");
                 if (yLoc == 0) {
@@ -1280,7 +1299,8 @@ struct FasmBackend
             // LVCMOS..._LVTTL_SSTL135_SSTL15.SLEW.SLOW alias.  The set below
             // is what a reference bitstream sets for an LVCMOS18 input on
             // bank 38, including the partner half's slew and pulldown.
-            if (is_riob18 && !is_output && !is_diff && yLoc == 0) {
+            bool is_right_hp_single_ended_input_master = is_riob18 && !is_output && !is_diff && is_master_half;
+            if (is_right_hp_single_ended_input_master) {
                 write_bit("LVCMOS12_LVCMOS15_LVCMOS18.SLEW.SLOW");
                 write_bit("LVCMOS12_LVCMOS15.IN");
                 write_bit("LVCMOS12_LVCMOS15_SSTL12_SSTL135_SSTL15.IN_ONLY");
@@ -1368,7 +1388,8 @@ struct FasmBackend
             // IN_ONLY
             if (!is_output) {
                 if (is_riob18) {
-                    if (is_diff && (yLoc == 0)) {
+                    bool is_diff_master_half = is_diff && is_master_half;
+                    if (is_diff_master_half) {
                         write_bit("LVCMOS12_LVCMOS15_LVCMOS18_SSTL12_SSTL135_SSTL15.IN_ONLY");
                         write_bit("LVCMOS12_LVCMOS15_SSTL12_SSTL135_SSTL15.IN_ONLY");
                     } else
@@ -1387,7 +1408,9 @@ struct FasmBackend
         // with FasmLookupError on either.  The original guard excluded SING
         // implicitly by only firing for inputs; widening it to outputs has to
         // exclude SING explicitly.
-        if ((!is_hp_bank || (is_liob18 && !is_diff && !is_sing)) && (is_low_volt_lvcmos || is_sstl)) {
+        bool bank_supports_stepdown = !is_hp_bank || (is_liob18 && !is_diff && !is_sing);
+        bool standard_uses_stepdown = is_low_volt_lvcmos || is_sstl;
+        if (bank_supports_stepdown && standard_uses_stepdown) {
             if (iostandard == "SSTL12") {
                 log_error("SSTL12 is only available on high performance banks.");
             }
@@ -1412,7 +1435,8 @@ struct FasmBackend
         if (is_output && is_diff) {
             // The slave half of a high-performance LVDS driver carries the
             // input-only bit; the driver itself is enabled by IOB_Y0.LVDS.OUT.
-            if (is_hp_bank && iostandard == "LVDS" && yLoc == 1)
+            bool is_hp_lvds_slave_half = is_hp_bank && iostandard == "LVDS" && yLoc == 1;
+            if (is_hp_lvds_slave_half)
                 write_bit("LVCMOS12_LVCMOS15_LVCMOS18_SSTL12_SSTL135_SSTL15.IN_ONLY");
             if (is_tmds33 && yLoc == 1) {
                 if (pad->attrs.count(id_IN_TERM))
@@ -1439,7 +1463,9 @@ struct FasmBackend
         // whose S half is really driven through the inverter.  A true LVDS
         // driver on a high-performance bank is enabled by IOB_Y0.LVDS.OUT
         // instead, and a reference bitstream for one sets no OUT_DIFF.
-        if (inv != BelId() && ctx->getBoundBelCell(inv) != nullptr && !(is_hp_bank && iostandard == "LVDS"))
+        bool output_inverter_used = inv != BelId() && ctx->getBoundBelCell(inv) != nullptr;
+        bool is_true_hp_lvds_driver = is_hp_bank && iostandard == "LVDS";
+        if (output_inverter_used && !is_true_hp_lvds_driver)
             write_bit("OUT_DIFF");
 
         if (is_stepdown && !is_sing)
@@ -1621,7 +1647,8 @@ struct FasmBackend
             // TRISTATE_WIDTH=1, silently overriding the cell's own parameter
             // (defaults to 4 in the library).
             // (Port of nextpnr-xilinx c05f0d05.)
-            if (int_or_default(ci->params, ctx->id("TRISTATE_WIDTH"), 4) == 4)
+            bool tristate_width_is_4 = int_or_default(ci->params, ctx->id("TRISTATE_WIDTH"), 4) == 4;
+            if (tristate_width_is_4)
                 write_bit("TRISTATE_WIDTH.W4");
             if (is_cascaded)
                 write_bit("SERDES_MODE.SLAVE");
@@ -1707,8 +1734,9 @@ struct FasmBackend
                     // GT pads live in the GT/OPAD tiles and are configured by
                     // the GT writers, not the IO path
                     std::string belname = ctx->nameOfBel(ci->bel);
-                    if (boost::contains(belname, "OPAD") || boost::contains(belname, "IPAD") ||
-                        boost::contains(belname, "GTPE2_") || boost::contains(belname, "GTXE2_")) {
+                    bool is_gt_pad = boost::contains(belname, "OPAD") || boost::contains(belname, "IPAD") ||
+                                     boost::contains(belname, "GTPE2_") || boost::contains(belname, "GTXE2_");
+                    if (is_gt_pad) {
                         blank();
                         continue;
                     }
@@ -1756,11 +1784,13 @@ struct FasmBackend
             std::set<int> ilogics;
             for (const auto &wire : used_wires_starting_with(tile, "", false)) {
                 auto pos = wire.find("_ILOGIC");
-                if (pos == std::string::npos || !boost::ends_with(wire, "_D"))
+                bool is_ilogic_d_wire = pos != std::string::npos && boost::ends_with(wire, "_D");
+                if (!is_ilogic_d_wire)
                     continue;
                 // ..._ILOGIC<n>_D -- take the digits between the two.
                 std::string index = wire.substr(pos + 7, wire.size() - (pos + 7) - 2);
-                if (index.empty() || index.find_first_not_of("0123456789") != std::string::npos)
+                bool index_is_numeric = !index.empty() && index.find_first_not_of("0123456789") == std::string::npos;
+                if (!index_is_numeric)
                     continue;
                 ilogics.insert(std::stoi(index));
             }
@@ -1773,7 +1803,8 @@ struct FasmBackend
             // -- a real gap in the database, and emitting the key anyway is
             // only a FasmLookupError.
             std::string tile_name = uarch->tile_name(tile);
-            if (!boost::starts_with(tile_name, "LIOI_") || boost::contains(tile_name, "_SING"))
+            bool tile_defines_zinv_d = boost::starts_with(tile_name, "LIOI_") && !boost::contains(tile_name, "_SING");
+            if (!tile_defines_zinv_d)
                 continue;
             push(tile_name);
             for (int index : ilogics) {
@@ -1926,11 +1957,16 @@ struct FasmBackend
         const bool b_side_reads_half_the_word = (is_36 ? (read_width_a == 72) : (read_width_a == 36));
         const bool a_side_writes_half_the_word = (!is_36 && (write_width_b == 36));
 
-        if (this_width_param_is_unset && this_param_is_read_width_b && b_side_reads_half_the_word) {
+        const bool widen_unset_read_width_b =
+                this_width_param_is_unset && this_param_is_read_width_b && b_side_reads_half_the_word;
+        const bool widen_unset_write_width_a =
+                this_width_param_is_unset && this_param_is_write_width_a && a_side_writes_half_the_word;
+
+        if (widen_unset_read_width_b) {
             write_bit("READ_WIDTH_B_18");
             return;
         }
-        if (this_width_param_is_unset && this_param_is_write_width_a && a_side_writes_half_the_word) {
+        if (widen_unset_write_width_a) {
             write_bit("WRITE_WIDTH_A_18");
             return;
         }
@@ -1956,7 +1992,8 @@ struct FasmBackend
             // READ_WIDTH_A=36 and an unused B port: READ_WIDTH_B_18 and the
             // B-side default READ_WIDTH_B_1 encode the SAME prjxray bit).
             // (Port of nextpnr-xilinx 1b7d51b9.)
-            if (name == "WRITE_WIDTH_A" || name == "WRITE_WIDTH_B")
+            bool is_write_width = name == "WRITE_WIDTH_A" || name == "WRITE_WIDTH_B";
+            if (is_write_width)
                 write_bit(name.substr(0, name.size() - 1) + ((name == "WRITE_WIDTH_B") ? "B_18" : "A_18"));
             else if (name == "READ_WIDTH_B")
                 write_bit(name.substr(0, name.size() - 1) + "B_18");
@@ -1976,7 +2013,8 @@ struct FasmBackend
                         dir_is_sdp36 = true;
                 }
             }
-            if (dir_is_sdp36 && actual_width == 1)
+            bool is_unused_sdp_partner_port = dir_is_sdp36 && actual_width == 1;
+            if (is_unused_sdp_partner_port)
                 return;
             write_bit(name + "_" + std::to_string(actual_width));
         }
@@ -2042,10 +2080,12 @@ struct FasmBackend
             // inverted -- i.e. tag 0, the bit clear, which is what emitting
             // nothing already gives.  So only the registered case needs
             // anything written.  (Port of nextpnr-xilinx e71acda2.)
-            if (bool_or_default(ci->params, ctx->id("DOA_REG"), false))
+            bool port_a_output_registered = bool_or_default(ci->params, ctx->id("DOA_REG"), false);
+            bool port_b_output_registered = bool_or_default(ci->params, ctx->id("DOB_REG"), false);
+            if (port_a_output_registered)
                 write_bit("ZINV_REGCLKARDRCLK",
                           !bool_or_default(ci->params, ctx->id("IS_CLKARDCLK_INVERTED"), false));
-            if (bool_or_default(ci->params, ctx->id("DOB_REG"), false))
+            if (port_b_output_registered)
                 write_bit("ZINV_REGCLKB",
                           !bool_or_default(ci->params, ctx->id("IS_CLKBWRCLK_INVERTED"), false));
             for (auto wrmode : {"WRITE_MODE_A", "WRITE_MODE_B"}) {
@@ -2547,9 +2587,11 @@ struct FasmBackend
         // Vivado's BUFR_DIVIDE is a string: "BYPASS" or "1".."8".
         std::string divide = str_or_default(ci->params, ctx->id("BUFR_DIVIDE"), "BYPASS");
         std::string divide_feature;
-        if (divide == "BYPASS" || divide.empty()) {
+        bool is_bypass = divide == "BYPASS" || divide.empty();
+        bool is_divide_1_to_8 = divide.size() == 1 && divide[0] >= '1' && divide[0] <= '8';
+        if (is_bypass) {
             divide_feature = "BYPASS";
-        } else if (divide.size() == 1 && divide[0] >= '1' && divide[0] <= '8') {
+        } else if (is_divide_1_to_8) {
             divide_feature = std::string("D") + divide[0];
         } else {
             // Emitting an undocumented feature instead would fail later in
@@ -2582,7 +2624,8 @@ struct FasmBackend
             if (ci->type == id_BSCAN) {
                 push("BSCAN");
                 int chain = int_or_default(ci->params, id_JTAG_CHAIN, 1);
-                if (chain < 1 || 4 < chain)
+                bool invalid_chain = chain < 1 || 4 < chain;
+                if (invalid_chain)
                     log_error("Invalid JTAG_CHAIN number of '%d'. Allowed values are: 1-4.\n", chain);
                 write_bit("JTAG_CHAIN_" + std::to_string(chain));
                 pop();
@@ -2592,7 +2635,8 @@ struct FasmBackend
             if (ci->type == id_ICAP_ICAP) {
                 push("ICAP");
                 std::string width = str_or_default(ci->params, id_ICAP_WIDTH, "X32");
-                if (width != "X32" && width != "X16" && width != "X8")
+                bool invalid_width = width != "X32" && width != "X16" && width != "X8";
+                if (invalid_width)
                     log_error("Unknown ICAP_WIDTH of '%s'. Allowed values are: X32, X16 and X8.\n", width.c_str());
                 if (width == "X16")
                     write_bit("ICAP_WIDTH_X16");
@@ -2602,7 +2646,8 @@ struct FasmBackend
             }
             if (ci->type == id_STARTUP_STARTUP) {
                 std::string prog_usr = str_or_default(ci->params, id_PROG_USR, "FALSE");
-                if (prog_usr != "TRUE" && prog_usr != "FALSE")
+                bool invalid_prog_usr = prog_usr != "TRUE" && prog_usr != "FALSE";
+                if (invalid_prog_usr)
                     log_error("Invalid PROG_USR attribute in STARTUPE2 of '%s'. Allowed values are: TRUE, FALSE.\n",
                               prog_usr.c_str());
                 write_bit("STARTUP.PROG_USR", prog_usr == "TRUE");
@@ -2694,31 +2739,37 @@ struct FasmBackend
         write_int_vector("PLL1_LOCK_CFG[8:0]", 0b111101000, 9);
 
         auto pll0_refclk_div = int_or_default(ci->params, ctx->id("PLL0_REFCLK_DIV"), 1);
-        if (pll0_refclk_div < 1 || pll0_refclk_div > 2)
+        bool invalid_pll0_refclk_div = pll0_refclk_div < 1 || pll0_refclk_div > 2;
+        if (invalid_pll0_refclk_div)
             log_error("PLL0_REFCLK_DIV can only be 1 or 2, but is: %d", pll0_refclk_div);
         write_bit("PLL0_REFCLK_DIV[4]", pll0_refclk_div == 1);
         auto pll1_refclk_div = int_or_default(ci->params, ctx->id("PLL1_REFCLK_DIV"), 1);
-        if (pll1_refclk_div < 1 || pll1_refclk_div > 2)
+        bool invalid_pll1_refclk_div = pll1_refclk_div < 1 || pll1_refclk_div > 2;
+        if (invalid_pll1_refclk_div)
             log_error("PLL1_REFCLK_DIV can only be 1 or 2, but is: %d", pll1_refclk_div);
         write_bit("PLL1_REFCLK_DIV[4]", pll1_refclk_div == 1);
 
         auto pll0_fbdiv = int_or_default(ci->params, ctx->id("PLL0_FBDIV"), 1);
-        if (pll0_fbdiv < 1 || pll0_fbdiv > 5)
+        bool invalid_pll0_fbdiv = pll0_fbdiv < 1 || pll0_fbdiv > 5;
+        if (invalid_pll0_fbdiv)
             log_error("PLL0_FBDIV can only be 1, 2, 3, 4 or 5, but is: %d", pll0_fbdiv);
         if (pll0_fbdiv == 1) write_bit("PLL0_FBDIV[4]");
         else write_int_vector("PLL0_FBDIV[1:0]", pll0_fbdiv - 2, 2);
         auto pll1_fbdiv = int_or_default(ci->params, ctx->id("PLL1_FBDIV"), 1);
-        if (pll1_fbdiv < 1 || pll1_fbdiv > 5)
+        bool invalid_pll1_fbdiv = pll1_fbdiv < 1 || pll1_fbdiv > 5;
+        if (invalid_pll1_fbdiv)
             log_error("PLL1_FBDIV can only be 1, 2, 3, 4 or 5, but is: %d", pll1_fbdiv);
         if (pll1_fbdiv == 1) write_bit("PLL1_FBDIV[4]");
         else write_int_vector("PLL1_FBDIV[1:0]", pll1_fbdiv - 2, 2);
 
         auto pll0_fbdiv_45 = int_or_default(ci->params, ctx->id("PLL0_FBDIV_45"), 4);
-        if (pll0_fbdiv_45 < 4 || pll0_fbdiv_45 > 5)
+        bool invalid_pll0_fbdiv_45 = pll0_fbdiv_45 < 4 || pll0_fbdiv_45 > 5;
+        if (invalid_pll0_fbdiv_45)
             log_error("PLL0_FBDIV_45 can only be 4 or 5, but is: %d", pll0_fbdiv);
         write_bit("PLL0_FBDIV_45[0]", pll0_fbdiv_45 == 5);
         auto pll1_fbdiv_45 = int_or_default(ci->params, ctx->id("PLL1_FBDIV_45"), 4);
-        if (pll1_fbdiv_45 < 4 || pll1_fbdiv_45 > 5)
+        bool invalid_pll1_fbdiv_45 = pll1_fbdiv_45 < 4 || pll1_fbdiv_45 > 5;
+        if (invalid_pll1_fbdiv_45)
             log_error("PLL1_FBDIV_45 can only be 4 or 5, but is: %d", pll1_fbdiv);
         write_bit("PLL1_FBDIV_45[0]", pll1_fbdiv_45 == 5);
 
@@ -2767,7 +2818,8 @@ struct FasmBackend
         write_int_vector("ALIGN_COMMA_ENABLE[9:0]", align_comma_enable, 10);
 
         auto align_comma_word = int_or_default(ci->params, ctx->id("ALIGN_COMMA_WORD"), 1);
-        if (align_comma_word < 1 || 2 < align_comma_word)
+        bool invalid_align_comma_word = align_comma_word < 1 || 2 < align_comma_word;
+        if (invalid_align_comma_word)
             log_error("ALIGN_COMMA_WORD may only be 1 or 2, but is: %d\n", align_comma_word);
         if (align_comma_word == 1)
             write_bit("ALIGN_COMMA_WORD[0]");
@@ -2800,7 +2852,8 @@ struct FasmBackend
 
         write_str_bool("CHAN_BOND_KEEP_ALIGN", "CHAN_BOND_KEEP_ALIGN");
         auto chan_bond_max_skew = int_or_default(ci->params, ctx->id("CHAN_BOND_MAX_SKEW"), 0);
-        if (chan_bond_max_skew < 1 || 14 < chan_bond_max_skew)
+        bool invalid_chan_bond_max_skew = chan_bond_max_skew < 1 || 14 < chan_bond_max_skew;
+        if (invalid_chan_bond_max_skew)
             log_error("CHAN_BOND_MAX_SKEW may only range from 1 to 14, but is: %d\n", chan_bond_max_skew);
         write_int_vector("CHAN_BOND_MAX_SKEW[3:0]", chan_bond_max_skew, 4);
 
@@ -2828,7 +2881,8 @@ struct FasmBackend
         write_int_vector("CHAN_BOND_SEQ_2_4[9:0]", chan_bond_seq_2_4, 10);
 
         auto chan_bond_seq_len = int_or_default(ci->params, ctx->id("CHAN_BOND_SEQ_LEN"), 0);
-        if (chan_bond_seq_len < 1 || 4 < chan_bond_seq_len)
+        bool invalid_chan_bond_seq_len = chan_bond_seq_len < 1 || 4 < chan_bond_seq_len;
+        if (invalid_chan_bond_seq_len)
             log_error("CHAN_BOND_SEQ_LEN may only range from 1 to 4, but is: %d\n", chan_bond_seq_len);
         write_int_vector("CHAN_BOND_SEQ_LEN[1:0]", chan_bond_seq_len - 1, 2);
 
@@ -2867,7 +2921,8 @@ struct FasmBackend
         write_int_vector("CLK_COR_SEQ_2_4[9:0]", clk_cor_seq_2_4, 10);
 
         auto clk_cor_seq_len = int_or_default(ci->params, ctx->id("CLK_COR_SEQ_LEN"), 0);
-        if (clk_cor_seq_len < 1 || 4 < clk_cor_seq_len)
+        bool invalid_clk_cor_seq_len = clk_cor_seq_len < 1 || 4 < clk_cor_seq_len;
+        if (invalid_clk_cor_seq_len)
             log_error("CLK_COR_SEQ_LEN may only range from 1 to 4, but is: %d\n", clk_cor_seq_len);
         write_int_vector("CLK_COR_SEQ_LEN[1:0]", clk_cor_seq_len - 1, 2);
 
@@ -2996,14 +3051,16 @@ struct FasmBackend
         auto rx_sig_valid_dly = int_or_default(ci->params, ctx->id("RX_SIG_VALID_DLY"), 0) - 1;
         write_int_vector("RX_SIG_VALID_DLY[4:0]", rx_sig_valid_dly, 5);
         auto rx_xclk_sel = str_or_default(ci->params, ctx->id("RX_XCLK_SEL"), "RXUSR");
-        if (rx_xclk_sel != "RXUSR" && rx_xclk_sel != "RXREC")
+        bool invalid_rx_xclk_sel = rx_xclk_sel != "RXUSR" && rx_xclk_sel != "RXREC";
+        if (invalid_rx_xclk_sel)
             log_error("RX_XCLK_SEL may only have values 'RXREC' or 'RXUSR' but is: '%s'\n", rx_xclk_sel.c_str());
         write_bit("RX_XCLK_SEL.RXUSR", rx_xclk_sel == "RXUSR");
         auto rx_clk25_div = int_or_default(ci->params, ctx->id("RX_CLK25_DIV"), 0) - 1;
         write_int_vector("RX_CLK25_DIV[4:0]", rx_clk25_div, 5);
 
         auto rxbuf_addr_mode = str_or_default(ci->params, ctx->id("RXBUF_ADDR_MODE"), "PMA");
-        if (rxbuf_addr_mode != "FULL" && rxbuf_addr_mode != "FAST")
+        bool invalid_rxbuf_addr_mode = rxbuf_addr_mode != "FULL" && rxbuf_addr_mode != "FAST";
+        if (invalid_rxbuf_addr_mode)
             log_error("RXBUF_ADDR_MODE may only have values 'FULL' or 'FAST' but is: '%s'\n", rxbuf_addr_mode.c_str());
         write_bit("RXBUF_ADDR_MODE.FAST", rxbuf_addr_mode == "FAST");
         auto rxbuf_eidle_hi_cnt = int_or_default(ci->params, ctx->id("RXBUF_EIDLE_HI_CNT"), 0);
@@ -3087,7 +3144,8 @@ struct FasmBackend
         auto rxoob_cfg = int_or_default(ci->params, ctx->id("RXOOB_CFG"), 0);
         write_int_vector("RXOOB_CFG[6:0]", rxoob_cfg, 7);
         auto rxoob_clk_cfg = str_or_default(ci->params, ctx->id("RXOOB_CLK_CFG"), "PMA");
-        if (rxoob_clk_cfg != "FABRIC" && rxoob_clk_cfg != "PMA")
+        bool invalid_rxoob_clk_cfg = rxoob_clk_cfg != "FABRIC" && rxoob_clk_cfg != "PMA";
+        if (invalid_rxoob_clk_cfg)
             log_error("RXOOB_CLK_CFG may only have values 'FABRIC' or 'PMA' but is: '%s'\n", rxoob_clk_cfg.c_str());
         write_bit("RXOOB_CLK_CFG.FABRIC", rxoob_clk_cfg == "FABRIC");
 
@@ -3125,7 +3183,9 @@ struct FasmBackend
         auto rxslide_auto_wait = int_or_default(ci->params, ctx->id("RXSLIDE_AUTO_WAIT"), 7);
         write_int_vector("RXSLIDE_AUTO_WAIT[3:0]", rxslide_auto_wait, 4);
         auto rxslide_mode = str_or_default(ci->params, ctx->id("RXSLIDE_MODE"), "OFF");
-        if (rxslide_mode != "OFF" && rxslide_mode != "AUTO" && rxslide_mode != "PCS" && rxslide_mode != "PMA")
+        bool invalid_rxslide_mode =
+                rxslide_mode != "OFF" && rxslide_mode != "AUTO" && rxslide_mode != "PCS" && rxslide_mode != "PMA";
+        if (invalid_rxslide_mode)
             log_error("RXSLIDE_MODE may only have values 'OFF', 'AUTO', 'PCS' or 'PMA' but is: '%s'\n", rxslide_mode.c_str());
         write_bit("RXSLIDE_MODE.AUTO", rxslide_mode == "AUTO");
         write_bit("RXSLIDE_MODE.PCS",  rxslide_mode == "PCS");
@@ -3162,7 +3222,9 @@ struct FasmBackend
         auto sata_min_wake = int_or_default(ci->params, ctx->id("SATA_MIN_WAKE"), 0);
         write_int_vector("SATA_MIN_WAKE[5:0]", sata_min_wake, 6);
         auto sata_pll_cfg = str_or_default(ci->params, ctx->id("SATA_PLL_CFG"), "VCO_3000MHZ");
-        if (sata_pll_cfg != "VCO_3000MHZ" && sata_pll_cfg != "VCO_1500MHZ" && sata_pll_cfg != "VCO_750MHZ")
+        bool invalid_sata_pll_cfg =
+                sata_pll_cfg != "VCO_3000MHZ" && sata_pll_cfg != "VCO_1500MHZ" && sata_pll_cfg != "VCO_750MHZ";
+        if (invalid_sata_pll_cfg)
             log_error("SATA_PLL_CFG may only have values 'VCO_3000MHZ', 'VCO_1500MHZ' or 'VCO_750MHZ' but is: '%s'\n", sata_pll_cfg.c_str());
         write_bit("SATA_PLL_CFG.VCO_1500MHZ", sata_pll_cfg == "VCO_1500MHZ");
         write_bit("SATA_PLL_CFG.VCO_750MHZ",  sata_pll_cfg == "VCO_750MHZ");
@@ -3198,7 +3260,8 @@ struct FasmBackend
         write_int_vector("TX_DATA_WIDTH[2:0]", tx_data_width, 3);
 
         auto tx_drive_mode = str_or_default(ci->params, ctx->id("TX_DRIVE_MODE"), "DIRECT");
-        if (tx_drive_mode != "DIRECT" && tx_drive_mode != "PIPE")
+        bool invalid_tx_drive_mode = tx_drive_mode != "DIRECT" && tx_drive_mode != "PIPE";
+        if (invalid_tx_drive_mode)
             log_error("TX_DRIVE_MODE may only have values 'PIPE' or 'DIRECT' but is: '%s'\n", tx_drive_mode.c_str());
         write_bit("TX_DRIVE_MODE.PIPE", tx_drive_mode == "PIPE");
 
@@ -3238,7 +3301,8 @@ struct FasmBackend
         auto tx_rxdetect_ref = int_or_default(ci->params, ctx->id("TX_RXDETECT_REF"), 0);
         write_int_vector("TX_RXDETECT_REF[2:0]", tx_rxdetect_ref, 3);
         auto tx_xclk_sel = str_or_default(ci->params, ctx->id("TX_XCLK_SEL"), "TXUSR");
-        if (tx_xclk_sel != "TXUSR" && tx_xclk_sel != "TXOUT")
+        bool invalid_tx_xclk_sel = tx_xclk_sel != "TXUSR" && tx_xclk_sel != "TXOUT";
+        if (invalid_tx_xclk_sel)
             log_error("TX_XCLK_SEL may only have values 'TXOUT' or 'TXUSR' but is: '%s'\n", tx_xclk_sel.c_str());
         write_bit("TX_XCLK_SEL.TXUSR", tx_xclk_sel == "TXUSR");
         auto tx_clk25_div = int_or_default(ci->params, ctx->id("TX_CLK25_DIV"), 0) - 1;
@@ -3277,7 +3341,8 @@ struct FasmBackend
         auto txpi_ppm_cfg = int_or_default(ci->params, ctx->id("TXPI_PPM_CFG"), 0);
         write_int_vector("TXPI_PPM_CFG[7:0]", txpi_ppm_cfg, 8);
         auto txpi_ppmclk_sel = str_or_default(ci->params, ctx->id("TXPI_PPMCLK_SEL"), "TXUSRCLK");
-        if (txpi_ppmclk_sel != "TXUSRCLK" && txpi_ppmclk_sel != "TXUSRCLK2")
+        bool invalid_txpi_ppmclk_sel = txpi_ppmclk_sel != "TXUSRCLK" && txpi_ppmclk_sel != "TXUSRCLK2";
+        if (invalid_txpi_ppmclk_sel)
             log_error("TXPI_PPMCLK_SEL may only have values 'TXUSRCLK2' or 'TXUSRCLK' but is: '%s'\n", txpi_ppmclk_sel.c_str());
         write_bit("TXPI_PPMCLK_SEL.TXUSRCLK2", txpi_ppmclk_sel == "TXUSRCLK2");
         auto txpi_synfreq_ppm = int_or_default(ci->params, ctx->id("TXPI_SYNFREQ_PPM"), 0);
@@ -3324,7 +3389,8 @@ struct FasmBackend
         write_bit("BOTH_GTREFCLK_USED", bool_or_default(ci->params, ctx->id("_BOTH_GTREFCLK_USED"), false));
         write_bit("GTREFCLK0_USED", bool_or_default(ci->params, ctx->id("_GTREFCLK0_USED"), false));
         write_bit("GTREFCLK1_USED", bool_or_default(ci->params, ctx->id("_GTREFCLK1_USED"), false));
-        if (bool_or_default(ci->params, ctx->id("_GTGREFCLK_USED"), false)) {
+        bool internal_refclk_used = bool_or_default(ci->params, ctx->id("_GTGREFCLK_USED"), false);
+        if (internal_refclk_used) {
             write_bit("GTREFCLK0_USED");
             write_bit("GTREFCLK1_USED");
         }
@@ -3363,7 +3429,8 @@ struct FasmBackend
         write_bit("QPLL_DMONITOR_SEL[0]", 0); // TODO: find real vivado default value
 
         auto qpll_refclk_div = int_or_default(ci->params, ctx->id("QPLL_REFCLK_DIV"), 1);
-        if (qpll_refclk_div < 1 || qpll_refclk_div > 4)
+        bool invalid_qpll_refclk_div = qpll_refclk_div < 1 || qpll_refclk_div > 4;
+        if (invalid_qpll_refclk_div)
             log_error("QPLL_REFCLK_DIV can only range from 1 to 4, but is: %d", qpll_refclk_div);
         auto real_qpll_refclk_div = qpll_refclk_div == 1 ? 16 : qpll_refclk_div - 2;
         write_int_vector("QPLL_REFCLK_DIV[4:0]", real_qpll_refclk_div, 5);
@@ -3406,7 +3473,8 @@ struct FasmBackend
         write_int_vector("ALIGN_COMMA_ENABLE[9:0]", align_comma_enable, 10);
 
         auto align_comma_word = int_or_default(ci->params, ctx->id("ALIGN_COMMA_WORD"), 1);
-        if (!(align_comma_word == 1 || align_comma_word == 2 || align_comma_word == 4))
+        bool valid_align_comma_word = align_comma_word == 1 || align_comma_word == 2 || align_comma_word == 4;
+        if (!valid_align_comma_word)
             log_error("ALIGN_COMMA_WORD may only be 1, 2 or 4 but is: %d\n", align_comma_word);
         write_int_vector("ALIGN_COMMA_WORD[2:0]", align_comma_word, 3);
 
@@ -3423,7 +3491,8 @@ struct FasmBackend
 
         write_str_bool("CHAN_BOND_KEEP_ALIGN", "CHAN_BOND_KEEP_ALIGN");
         auto chan_bond_max_skew = int_or_default(ci->params, ctx->id("CHAN_BOND_MAX_SKEW"), 0);
-        if (chan_bond_max_skew < 1 || 14 < chan_bond_max_skew)
+        bool invalid_chan_bond_max_skew = chan_bond_max_skew < 1 || 14 < chan_bond_max_skew;
+        if (invalid_chan_bond_max_skew)
             log_error("CHAN_BOND_MAX_SKEW may only range from 1 to 14, but is: %d\n", chan_bond_max_skew);
         write_int_vector("CHAN_BOND_MAX_SKEW[3:0]", chan_bond_max_skew, 4);
 
@@ -3451,7 +3520,8 @@ struct FasmBackend
         write_int_vector("CHAN_BOND_SEQ_2_4[9:0]", chan_bond_seq_2_4, 10);
 
         auto chan_bond_seq_len = int_or_default(ci->params, ctx->id("CHAN_BOND_SEQ_LEN"), 0);
-        if (!(chan_bond_seq_len == 1 || chan_bond_seq_len == 2 || chan_bond_seq_len == 4))
+        bool valid_chan_bond_seq_len = chan_bond_seq_len == 1 || chan_bond_seq_len == 2 || chan_bond_seq_len == 4;
+        if (!valid_chan_bond_seq_len)
             log_error("CHAN_BOND_SEQ_LEN may only be 1, 2 or 4, but is: %d\n", chan_bond_seq_len);
         write_int_vector("CHAN_BOND_SEQ_LEN[1:0]", chan_bond_seq_len - 1, 2);
 
@@ -3488,7 +3558,8 @@ struct FasmBackend
         write_int_vector("CLK_COR_SEQ_2_4[9:0]", clk_cor_seq_2_4, 10);
 
         auto clk_cor_seq_len = int_or_default(ci->params, ctx->id("CLK_COR_SEQ_LEN"), 0);
-        if (clk_cor_seq_len < 1 || 4 < clk_cor_seq_len)
+        bool invalid_clk_cor_seq_len = clk_cor_seq_len < 1 || 4 < clk_cor_seq_len;
+        if (invalid_clk_cor_seq_len)
             log_error("CLK_COR_SEQ_LEN may only range from 1 to 4, but is: %d\n", clk_cor_seq_len);
         write_int_vector("CLK_COR_SEQ_LEN[1:0]", clk_cor_seq_len - 1, 2);
 
@@ -3517,7 +3588,8 @@ struct FasmBackend
         write_int_vector("CPLL_FBDIV[4:0]", cpll_fbdiv, 5);
 
         auto cpll_fbdiv_45 = int_or_default(ci->params, ctx->id("CPLL_FBDIV_45"), 4);
-        if (cpll_fbdiv_45 < 4 || cpll_fbdiv_45 > 5)
+        bool invalid_cpll_fbdiv_45 = cpll_fbdiv_45 < 4 || cpll_fbdiv_45 > 5;
+        if (invalid_cpll_fbdiv_45)
             log_error("CPLL_FBDIV_45 can only be 4 or 5, but is: %d", cpll_fbdiv);
         write_bit("CPLL_FBDIV_45[0]", cpll_fbdiv_45 == 5);
 
@@ -3687,14 +3759,16 @@ struct FasmBackend
         auto rx_sig_valid_dly = int_or_default(ci->params, ctx->id("RX_SIG_VALID_DLY"), 0) - 1;
         write_int_vector("RX_SIG_VALID_DLY[4:0]", rx_sig_valid_dly, 5);
         auto rx_xclk_sel = str_or_default(ci->params, ctx->id("RX_XCLK_SEL"), "RXUSR");
-        if (rx_xclk_sel != "RXUSR" && rx_xclk_sel != "RXREC")
+        bool invalid_rx_xclk_sel = rx_xclk_sel != "RXUSR" && rx_xclk_sel != "RXREC";
+        if (invalid_rx_xclk_sel)
             log_error("RX_XCLK_SEL may only have values 'RXREC' or 'RXUSR' but is: '%s'\n", rx_xclk_sel.c_str());
         write_bit("RX_XCLK_SEL.RXUSR", rx_xclk_sel == "RXUSR");
         auto rx_clk25_div = int_or_default(ci->params, ctx->id("RX_CLK25_DIV"), 0) - 1;
         write_int_vector("RX_CLK25_DIV[4:0]", rx_clk25_div, 5);
 
         auto rxbuf_addr_mode = str_or_default(ci->params, ctx->id("RXBUF_ADDR_MODE"), "PMA");
-        if (rxbuf_addr_mode != "FULL" && rxbuf_addr_mode != "FAST")
+        bool invalid_rxbuf_addr_mode = rxbuf_addr_mode != "FULL" && rxbuf_addr_mode != "FAST";
+        if (invalid_rxbuf_addr_mode)
             log_error("RXBUF_ADDR_MODE may only have values 'FULL' or 'FAST' but is: '%s'\n", rxbuf_addr_mode.c_str());
         write_bit("RXBUF_ADDR_MODE.FAST", rxbuf_addr_mode == "FAST");
         auto rxbuf_eidle_hi_cnt = int_or_default(ci->params, ctx->id("RXBUF_EIDLE_HI_CNT"), 0);
@@ -3777,7 +3851,9 @@ struct FasmBackend
         auto rxslide_auto_wait = int_or_default(ci->params, ctx->id("RXSLIDE_AUTO_WAIT"), 7);
         write_int_vector("RXSLIDE_AUTO_WAIT[3:0]", rxslide_auto_wait, 4);
         auto rxslide_mode = str_or_default(ci->params, ctx->id("RXSLIDE_MODE"), "OFF");
-        if (rxslide_mode != "OFF" && rxslide_mode != "AUTO" && rxslide_mode != "PCS" && rxslide_mode != "PMA")
+        bool invalid_rxslide_mode =
+                rxslide_mode != "OFF" && rxslide_mode != "AUTO" && rxslide_mode != "PCS" && rxslide_mode != "PMA";
+        if (invalid_rxslide_mode)
             log_error("RXSLIDE_MODE may only have values 'OFF', 'AUTO', 'PCS' or 'PMA' but is: '%s'\n", rxslide_mode.c_str());
         write_bit("RXSLIDE_MODE.AUTO", rxslide_mode == "AUTO");
         write_bit("RXSLIDE_MODE.PCS",  rxslide_mode == "PCS");
@@ -3807,7 +3883,9 @@ struct FasmBackend
         auto sata_min_wake = int_or_default(ci->params, ctx->id("SATA_MIN_WAKE"), 0);
         write_int_vector("SATA_MIN_WAKE[5:0]", sata_min_wake, 6);
         auto sata_cpll_cfg = str_or_default(ci->params, ctx->id("SATA_CPLL_CFG"), "VCO_3000MHZ");
-        if (sata_cpll_cfg != "VCO_3000MHZ" && sata_cpll_cfg != "VCO_1500MHZ" && sata_cpll_cfg != "VCO_750MHZ")
+        bool invalid_sata_cpll_cfg =
+                sata_cpll_cfg != "VCO_3000MHZ" && sata_cpll_cfg != "VCO_1500MHZ" && sata_cpll_cfg != "VCO_750MHZ";
+        if (invalid_sata_cpll_cfg)
             log_error("SATA_CPLL_CFG may only have values 'VCO_3000MHZ', 'VCO_1500MHZ' or 'VCO_750MHZ' but is: '%s'\n", sata_cpll_cfg.c_str());
         write_bit("SATA_CPLL_CFG.VCO_1500MHZ", sata_cpll_cfg == "VCO_1500MHZ");
         write_bit("SATA_CPLL_CFG.VCO_750MHZ",  sata_cpll_cfg == "VCO_750MHZ");
@@ -3847,7 +3925,9 @@ struct FasmBackend
         write_bit("TX_INT_DATAWIDTH[0]", tx_int_datawidth);
 
         auto tx_drive_mode = str_or_default(ci->params, ctx->id("TX_DRIVE_MODE"), "DIRECT");
-        if (tx_drive_mode != "DIRECT" && tx_drive_mode != "PIPE" && tx_drive_mode != "PIPEGEN3")
+        bool invalid_tx_drive_mode =
+                tx_drive_mode != "DIRECT" && tx_drive_mode != "PIPE" && tx_drive_mode != "PIPEGEN3";
+        if (invalid_tx_drive_mode)
             log_error("TX_DRIVE_MODE may only have values 'PIPE',  'PIPEGEN3' or 'DIRECT' but is: '%s'\n", tx_drive_mode.c_str());
         write_bit("TX_DRIVE_MODE.PIPE", tx_drive_mode == "PIPE");
         write_bit("TX_DRIVE_MODE.PIPEGEN3", tx_drive_mode == "PIPEGEN3");
@@ -3888,7 +3968,8 @@ struct FasmBackend
         auto tx_rxdetect_ref = int_or_default(ci->params, ctx->id("TX_RXDETECT_REF"), 0);
         write_int_vector("TX_RXDETECT_REF[2:0]", tx_rxdetect_ref, 3);
         auto tx_xclk_sel = str_or_default(ci->params, ctx->id("TX_XCLK_SEL"), "TXUSR");
-        if (tx_xclk_sel != "TXUSR" && tx_xclk_sel != "TXOUT")
+        bool invalid_tx_xclk_sel = tx_xclk_sel != "TXUSR" && tx_xclk_sel != "TXOUT";
+        if (invalid_tx_xclk_sel)
             log_error("TX_XCLK_SEL may only have values 'TXOUT' or 'TXUSR' but is: '%s'\n", tx_xclk_sel.c_str());
         write_bit("TX_XCLK_SEL.TXUSR", tx_xclk_sel == "TXUSR");
         auto tx_clk25_div = int_or_default(ci->params, ctx->id("TX_CLK25_DIV"), 0) - 1;
@@ -4592,10 +4673,11 @@ struct FasmBackend
     {
         for (auto &cell : ctx->cells) {
             CellInfo *ci = cell.second.get();
+            bool is_placed = ci->bel != BelId();
             if (ci->type == id_DSP48E1_DSP48E1) {
                 write_dsp_cell(ci);
                 blank();
-            } else if (ci->type == id_BUFR_BUFR && ci->bel != BelId()) {
+            } else if (ci->type == id_BUFR_BUFR && is_placed) {
                 write_bufr(ci);
                 blank();
             } else if (ci->type == id_GTPE2_COMMON) {
@@ -4610,10 +4692,10 @@ struct FasmBackend
             } else if (ci->type == id_GTXE2_CHANNEL) {
                 write_gtx_channel(ci);
                 blank();
-            } else if (ci->type == id_IBUFDS_GTE2 && ci->bel != BelId()) {
+            } else if (ci->type == id_IBUFDS_GTE2 && is_placed) {
                 write_ibufds_gte2(ci);
                 blank();
-            } else if (ci->type == id_PCIE_2_1_PCIE_2_1 && ci->bel != BelId()) {
+            } else if (ci->type == id_PCIE_2_1_PCIE_2_1 && is_placed) {
                 write_pcie_2_1(ci);
                 blank();
             }
@@ -4676,7 +4758,8 @@ void XilinxImpl::write_placement(const std::string &filename)
     auto escape = [](const std::string &in) {
         std::string r;
         for (char c : in) {
-            if (c == '"' || c == '\\')
+            bool needs_escape = c == '"' || c == '\\';
+            if (needs_escape)
                 r.push_back('\\');
             r.push_back(c);
         }
@@ -4704,15 +4787,19 @@ void XilinxImpl::write_placement(const std::string &filename)
         auto at = n.find(kDupTag);
         if (at == std::string::npos)
             continue;
-        if (bel_name_in_site(ci->bel).str(ctx).find("IDELAYCTRL") == std::string::npos)
+        bool on_idelayctrl_bel = bel_name_in_site(ci->bel).str(ctx).find("IDELAYCTRL") != std::string::npos;
+        if (!on_idelayctrl_bel)
             continue;
         std::string orig = n.substr(0, at);
         idelay_dup.insert(ci->name);
         auto it = idelay_orig.find(orig);
         if (it == idelay_orig.end()) {
             idelay_orig[orig] = ci;
-        } else if (ci->getPort(id_REFCLK) != it->second->getPort(id_REFCLK) ||
-                   ci->getPort(id_RST) != it->second->getPort(id_RST)) {
+            continue;
+        }
+        bool copies_disagree = ci->getPort(id_REFCLK) != it->second->getPort(id_REFCLK) ||
+                               ci->getPort(id_RST) != it->second->getPort(id_RST);
+        if (copies_disagree) {
             log_error("IDELAYCTRL copies of '%s' distribute different REFCLK/RST; "
                       "cannot merge them for the placement dump\n",
                       orig.c_str());
@@ -4726,8 +4813,8 @@ void XilinxImpl::write_placement(const std::string &filename)
         // PSEUDO_VCC / PSEUDO_GND and friends sit on bels with no site at all,
         // so the site index cannot be trusted to be in range here.
         const auto &sites = tile_extra_data(site.tile)->sites;
-        std::string site_str =
-                (site.site < 0 || site.site >= sites.ssize()) ? std::string() : get_site_name(site).str(ctx);
+        bool bel_has_site = site.site >= 0 && site.site < sites.ssize();
+        std::string site_str = bel_has_site ? get_site_name(site).str(ctx) : std::string();
 
         if (!first)
             out << ",\n";

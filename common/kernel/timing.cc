@@ -646,11 +646,15 @@ void TimingAnalyser::walk_backward()
                 IdString mcp_attr = ctx->id("NEXTPNR_MCP_SETUP");
                 int mcp = 1;
                 CellInfo *ep_cell = nullptr;
-                if (ep.first.cell != IdString() && ctx->cells.count(ep.first.cell))
+                bool endpoint_cell_exists = ep.first.cell != IdString() && ctx->cells.count(ep.first.cell);
+                if (endpoint_cell_exists)
                     ep_cell = ctx->cells.at(ep.first.cell).get();
-                if (ep_cell && ep_cell->attrs.count(mcp_attr))
+                bool endpoint_is_multicycle = ep_cell && ep_cell->attrs.count(mcp_attr);
+                if (endpoint_is_multicycle)
                     mcp = std::max(1, std::atoi(ep_cell->attrs.at(mcp_attr).as_string().c_str()));
-                if (mcp > 1 && dom.key.clock != IdString() && ctx->nets.count(dom.key.clock)) {
+                bool capture_clock_exists = dom.key.clock != IdString() && ctx->nets.count(dom.key.clock);
+                bool relax_by_extra_periods = mcp > 1 && capture_clock_exists;
+                if (relax_by_extra_periods) {
                     NetInfo *clk_net = ctx->nets.at(dom.key.clock).get();
                     if (clk_net->clkconstr)
                         init_required.min_delay -= clk_net->clkconstr->period.minDelay() * (mcp - 1);
