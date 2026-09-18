@@ -546,7 +546,11 @@ void CommandHandler::setupContext(Context *ctx)
     if (vm.count("placer-heap-congestion-spread"))
         ctx->settings[ctx->id("placerHeap/congestionSpread")] = true;
     if (vm.count("placer-heap-congestion-weight"))
-        ctx->settings[ctx->id("placerHeap/congestionWeight")] = std::to_string(vm["placer-heap-congestion-weight"].as<float>());
+        ctx->settings[ctx->id("placerHeap/congestionWeight")] =
+                std::to_string(vm["placer-heap-congestion-weight"].as<float>());
+    bool weight_without_spread = vm.count("placer-heap-congestion-weight") && !vm.count("placer-heap-congestion-spread");
+    if (weight_without_spread)
+        log_warning("--placer-heap-congestion-weight has no effect without --placer-heap-congestion-spread\n");
 
     if (vm.count("placer-heap-cell-placement-timeout"))
         ctx->settings[ctx->id("placerHeap/cellPlacementTimeout")] =

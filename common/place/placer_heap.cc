@@ -1638,7 +1638,8 @@ class HeAPPlacer
                 if (c == nullptr)
                     return false;
                 auto it = p->cell_locs.find(c->name);
-                if (it == p->cell_locs.end())
+                const bool cell_has_location = it != p->cell_locs.end();
+                if (!cell_has_location)
                     return false;
                 // Locked and pseudo cells keep the location of a bel that
                 // build_fast_bels never saw (it skips bound bels), so they are
@@ -1660,7 +1661,8 @@ class HeAPPlacer
                         miny = std::min(miny, cy); maxy = std::max(maxy, cy);
                     }
                 }
-                if (maxx < minx || maxy < miny)
+                const bool net_has_placed_pins = maxx >= minx && maxy >= miny;
+                if (!net_has_placed_pins)
                     continue;
                 int bw = maxx - minx, bh = maxy - miny;
                 double area = double(bw + 1) * double(bh + 1);
@@ -1680,9 +1682,11 @@ class HeAPPlacer
             // it whether or not the design is congested at all.
             std::vector<float> crossed;
             for (int x = 0; x < W; x++)
-                for (int y = 0; y < H; y++)
-                    if (congestion.at(x).at(y) > 0.0f)
+                for (int y = 0; y < H; y++) {
+                    const bool some_net_crosses_tile = congestion.at(x).at(y) > 0.0f;
+                    if (some_net_crosses_tile)
                         crossed.push_back(congestion.at(x).at(y));
+                }
             float median = 1.0f;
             if (!crossed.empty()) {
                 std::nth_element(crossed.begin(), crossed.begin() + crossed.size() / 2, crossed.end());
@@ -1697,7 +1701,8 @@ class HeAPPlacer
                 for (int y = 0; y < H; y++) {
                     congestion.at(x).at(y) /= median;
                     peak = std::max(peak, congestion.at(x).at(y));
-                    if (congestion.at(x).at(y) > 1.0f)
+                    const bool denser_than_typical = congestion.at(x).at(y) > 1.0f;
+                    if (denser_than_typical)
                         ++hot;
                 }
             log_info("    congestion-spread: RUDY map built, peak %.1fx median, %d hot tiles (weight %.2f)\n", peak, hot, cong_w);
