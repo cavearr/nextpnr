@@ -31,9 +31,9 @@
  *   - To make the placer timing-driven, the bound2bound weights are multiplied by (1 + 10 * crit^2)
  */
 
+#include "placer_heap.h"
 #include <algorithm>
 #include <cmath>
-#include "placer_heap.h"
 #include <Eigen/Core>
 #include <Eigen/IterativeLinearSolvers>
 #include <boost/optional.hpp>
@@ -1607,12 +1607,14 @@ class HeAPPlacer
             // so the strict legaliser -- which uses the REAL capacity -- can
             // still pack what remains.  The spreader only decides WHERE cells
             // want to be; final legality is unaffected.
-            if (cong_on && raw > 0 && !congestion.empty()) {
-                float c = congestion.at(x).at(y);
-                if (c > 1.0f) {
-                    float factor = 1.0f / (1.0f + cong_w * (c - 1.0f));
-                    if (factor < 0.5f)
-                        factor = 0.5f;
+            const bool congestion_map_usable = cong_on && !congestion.empty();
+            const bool tile_can_be_penalised = congestion_map_usable && raw > 0;
+            if (tile_can_be_penalised) {
+                const float tile_congestion = congestion.at(x).at(y);
+                const bool denser_than_typical = tile_congestion > 1.0f;
+                if (denser_than_typical) {
+                    const float unclamped = 1.0f / (1.0f + cong_w * (tile_congestion - 1.0f));
+                    const float factor = std::max(0.5f, unclamped);
                     raw = std::max(1, int(std::floor(raw * factor)));
                 }
             }
@@ -1622,7 +1624,8 @@ class HeAPPlacer
         // RUDY-style congestion from the current placement: each net spreads its
         // wire density (HPWL / bounding-box area) over the tiles its box covers.
         // No routing -- a placement-domain estimate, cheap enough to run before
-        // every spread.  Normalised so the mean tile is 1.0.
+        // every spread.  Normalised so the MEDIAN tile that any net crosses
+        // reads 1.0.
         void init_congestion()
         {
             cong_on = p->cfg.congestionSpread;
@@ -1637,8 +1640,11 @@ class HeAPPlacer
                 auto it = p->cell_locs.find(c->name);
                 if (it == p->cell_locs.end())
                     return false;
-                x = it->second.x;
-                y = it->second.y;
+                // Locked and pseudo cells keep the location of a bel that
+                // build_fast_bels never saw (it skips bound bels), so they are
+                // not bounded by max_x/max_y the way solved cells are.
+                x = std::max(0, std::min(p->max_x, it->second.x));
+                y = std::max(0, std::min(p->max_y, it->second.y));
                 return true;
             };
             for (auto &net_pair : ctx->nets) {
@@ -1663,32 +1669,36 @@ class HeAPPlacer
                     for (int y = miny; y <= maxy; y++)
                         congestion.at(x).at(y) += float(dens);
             }
-            // Normalise by the mean over OCCUPIED tiles only.  Averaging in the
-            // empty sea of a sparse design drives the mean to near zero and
-            // every used tile reads as wildly "hot" (johnson peaked at 1574x);
-            // the occupied-tile mean makes "above 1.0" mean genuinely denser
-            // than its routing-using peers.
-            // Normalise by the MEDIAN over occupied tiles (robust to the RUDY
-            // power-law: a few tiles the whole design crosses read thousands of
-            // times typical, so the mean is dragged up and almost nothing reads
-            // "hot"; the median keeps "above 1.0" meaning denser than typical).
-            std::vector<float> occ;
+            // Normalise by the MEDIAN over the tiles some net crosses.  The
+            // mean over every tile drives the divisor to near zero in a sparse
+            // design and every used tile reads as wildly "hot" (johnson peaked
+            // at 1574x); the mean over crossed tiles is dragged up by the RUDY
+            // power law -- a few tiles the whole design crosses read thousands
+            // of times typical -- and then almost nothing reads "hot".  The
+            // median keeps "above 1.0" meaning denser than typical.  Note this
+            // is a RELATIVE measure: about half of the crossed tiles are above
+            // it whether or not the design is congested at all.
+            std::vector<float> crossed;
             for (int x = 0; x < W; x++)
                 for (int y = 0; y < H; y++)
-                    if (congestion.at(x).at(y) > 0.0f) occ.push_back(congestion.at(x).at(y));
-            float mean = 1.0f;
-            if (!occ.empty()) {
-                std::nth_element(occ.begin(), occ.begin() + occ.size() / 2, occ.end());
-                mean = occ.at(occ.size() / 2);
-                if (mean <= 0) mean = 1.0f;
+                    if (congestion.at(x).at(y) > 0.0f)
+                        crossed.push_back(congestion.at(x).at(y));
+            float median = 1.0f;
+            if (!crossed.empty()) {
+                std::nth_element(crossed.begin(), crossed.begin() + crossed.size() / 2, crossed.end());
+                median = crossed.at(crossed.size() / 2);
             }
-            if (mean <= 0) mean = 1.0f;
-            float peak = 0; int hot = 0;
+            const bool median_unusable = !(median > 0.0f);
+            if (median_unusable)
+                median = 1.0f;
+            float peak = 0;
+            int hot = 0;
             for (int x = 0; x < W; x++)
                 for (int y = 0; y < H; y++) {
-                    congestion.at(x).at(y) /= mean;
+                    congestion.at(x).at(y) /= median;
                     peak = std::max(peak, congestion.at(x).at(y));
-                    if (congestion.at(x).at(y) > 1.0f) ++hot;
+                    if (congestion.at(x).at(y) > 1.0f)
+                        ++hot;
                 }
             log_info("    congestion-spread: RUDY map built, peak %.1fx median, %d hot tiles (weight %.2f)\n", peak, hot, cong_w);
         }
