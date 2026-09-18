@@ -1340,7 +1340,16 @@ struct FasmBackend
                 // IOB_Y1, and IOB_Y0 carries IBUF_HP_BANK_GLUE instead.  One
                 // set bit serves both halves; describing it from neither
                 // leaves it clear and the inputs deaf.
-                if (is_low_volt_lvcmos) {
+                //
+                // That sharing is a high-performance bank property.  An HR
+                // tile (LIOB33/RIOB33) gives each half its own .IN bits and
+                // has no IBUF_HP_BANK_GLUE key at all, so there every
+                // receiving half describes its own .IN -- the HyperRAM data
+                // pairs on the Sonata are LVCMOS18 inouts on an HR bank.
+                bool halves_share_in_bit = is_hp_bank;
+                if (is_low_volt_lvcmos && !halves_share_in_bit) {
+                    write_bit("LVCMOS12_LVCMOS15_LVCMOS18.IN");
+                } else if (is_low_volt_lvcmos) {
                     if (!partner_pad_is_input())
                         write_bit("LVCMOS12_LVCMOS15_LVCMOS18.IN");
                     else if (is_output) {
