@@ -812,7 +812,8 @@ void XilinxImpl::fixup_routing()
                     auto &orig_attr = lut6->attrs[ctx->idf("X_ORIG_PORT_%s", p.c_str(ctx))].str;
                     bool first = true;
                     for (auto &nc : new_connections.at(p)) {
-                        orig_attr += orig_ports_l6[nc] + (first ? "" : " ");
+                        const std::string separator = first ? "" : " ";
+                        orig_attr += separator + orig_ports_l6[nc];
                         first = false;
                     }
                     if (orig_attr.empty())
@@ -827,7 +828,8 @@ void XilinxImpl::fixup_routing()
                     auto &orig_attr = lut5->attrs[ctx->idf("X_ORIG_PORT_%s", p.c_str(ctx))].str;
                     bool first = true;
                     for (auto &nc : new_connections.at(p)) {
-                        orig_attr += orig_ports_l5[nc] + (first ? "" : " ");
+                        const std::string separator = first ? "" : " ";
+                        orig_attr += separator + orig_ports_l5[nc];
                         first = false;
                     }
                     if (orig_attr.empty())
