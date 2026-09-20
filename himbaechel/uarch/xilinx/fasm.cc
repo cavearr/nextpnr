@@ -723,9 +723,24 @@ struct FasmBackend
                     continue;
                 push(get_bel_name(ff->bel));
                 bool zrst = false, zinit = false;
-                zinit = (int_or_default(ff->params, id_INIT, 0) != 1);
                 IdString srsig;
                 std::string type = str_or_default(ff->attrs, id_X_ORIG_TYPE, "");
+                // Vivado write_verilog omits parameters at their primitive
+                // default, so a bare FDSE/FDPE arrives with NO INIT param -- and
+                // their primitive default is INIT=1 (FDRE/FDCE default 0).  A
+                // hardcoded 0 default set ZINI (init=0) on every set/preset FF,
+                // breaking reset synchronizers and INIT=1 startup FSMs at
+                // configuration.  A present-but-undefined INIT ('x') has to be
+                // treated as absent as well: the netlists the regression cases
+                // are built from carry it, and int_or_default() resolves an 'x'
+                // bit to 0, which is the same bug by another route.
+                const bool type_defaults_init_high =
+                        (type == "FDSE" || type == "FDSE_1" || type == "FDPE" || type == "FDPE_1");
+                const int default_init = type_defaults_init_high ? 1 : 0;
+                auto init_it = ff->params.find(id_INIT);
+                const bool init_is_defined = (init_it != ff->params.end()) && init_it->second.is_fully_def();
+                const int init_val = init_is_defined ? int_or_default(ff->params, id_INIT, default_init) : default_init;
+                zinit = (init_val != 1);
                 if (type == "FDRE") {
                     zrst = true;
                     SET_CHECK(negedge_ff, false);
@@ -789,6 +804,39 @@ struct FasmBackend
 
                 found_ff = true;
             }
+        }
+        // A LUT-RAM shares the half-slice clock inverter with the flipflops: on
+        // 7-series the CLKINV/NOCLKINV bit inverts the clock of every clocked
+        // element of the slice, so a distributed RAM whose write clock is
+        // inverted (the RAM*X1S_1 Unisim variants, or IS_WCLK_INVERTED on an
+        // imported netlist) is expressed by that same bit.  The packer carries
+        // the parameter this far; ignoring it here produced a FASM
+        // byte-identical to the non-inverted design, i.e. a memory written on
+        // the wrong clock edge with a clean exit status.
+        bool found_mem = false, mem_clkinv = false;
+        for (int i = 0; i < 4; i++) {
+            for (int k = 0; k < 2; k++) {
+                CellInfo *lut = lts->cells[(half << 6) | (i << 4) | (k ? BEL_5LUT : BEL_6LUT)];
+                if (lut == nullptr || !lut->attrs.count(id_X_LUT_AS_DRAM))
+                    continue;
+                const bool lut_clkinv = bool_or_default(lut->params, id_IS_WCLK_INVERTED, false);
+                const bool mem_disagrees = found_mem && (lut_clkinv != mem_clkinv);
+                if (mem_disagrees)
+                    log_error("FASM: LUT-RAM '%s' (type %s) at bel %s disagrees with its half-slice on "
+                              "'IS_WCLK_INVERTED' (tile %s) -- control-set contention in the placement\n",
+                              lut->name.c_str(ctx), lut->type.c_str(ctx), ctx->getBelName(lut->bel).str(ctx),
+                              tname.c_str());
+                mem_clkinv = lut_clkinv;
+                found_mem = true;
+            }
+        }
+        if (found_mem) {
+            const bool mem_and_ff_disagree = found_ff && (mem_clkinv != is_clkinv);
+            if (mem_and_ff_disagree)
+                log_error("FASM: LUT-RAM in tile %s needs clock inversion %d, but the flipflops in the same "
+                          "half-slice need %d -- control-set contention in the placement\n",
+                          tname.c_str(), int(mem_clkinv), int(is_clkinv));
+            is_clkinv = mem_clkinv;
         }
         write_bit("LATCH", is_latch);
         write_bit("FFSYNC", is_sync);

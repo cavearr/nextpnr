@@ -1,0 +1,128 @@
+# Regression gate: the xc7 FASM cases from openXC7/demo-projects, run against
+# the himbaechel xilinx uarch built from this tree.
+#
+# Why it exists: demo-projects/regression/ holds one case per fixed
+# nextpnr-xilinx bug, each asserting a property of the produced FASM -- or of
+# the routed netlist -- that a plausible packer or writer bug breaks while
+# still exiting 0.  The legacy fork gates them from its own CI
+# (nextpnr-xilinx/.github/workflows/demos.yml); the himbaechel uarch, which is
+# where those fixes are being carried to, did not run them at all, so a defect
+# could be reintroduced or left unported with every other job green.
+#
+# The suite is the porting work list: every case that fails here is a fix that
+# exists in nextpnr-xilinx and has not arrived yet.  Cases whose fixes are
+# still outstanding are listed as `known_unported` so that the gate is honest
+# rather than either silent or permanently red -- a green run still proves the
+# ported ones, and the outstanding ones stay named, with the reason.
+#
+# The binary is reached through the same CLI shim the demos use
+# (.github/scripts/nextpnr-xilinx-shim.sh): regression/run.sh hard-codes the
+# name `nextpnr-xilinx`, and the shim translates --chipdb/--xdc/--fasm into
+# himbaechel's --device/-o xdc=/-o fasm=.  Chipdbs come from our own generator
+# (gen/xilinx_gen.py), not from the fork's bbaexport.py.
+name: regression
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: regression-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # The database the chipdbs are generated from, and the demo-projects commit
+  # carrying the cases.  Pinned, because the chipdb decides what the cases do.
+  PRJXRAY_DB_REV: ab1fc60c38a0dc1bc1d3d495f3189b25ae971e04
+  DEMO_PROJECTS_REV: main
+
+jobs:
+  regression:
+    name: xc7 FASM regression cases
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out this tree
+        uses: actions/checkout@v4
+        with:
+          path: nextpnr
+          submodules: recursive
+
+      - name: Check out prjxray-db
+        uses: actions/checkout@v4
+        with:
+          repository: openXC7/prjxray-db
+          ref: ${{ env.PRJXRAY_DB_REV }}
+          path: prjxray-db
+
+      - name: Check out demo-projects
+        uses: actions/checkout@v4
+        with:
+          repository: openXC7/demo-projects
+          ref: ${{ env.DEMO_PROJECTS_REV }}
+          path: demo-projects
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build libeigen3-dev python3 yosys
+
+      # xc7a35t is deliberately absent: the openXC7 prjxray-db has Artix-35T
+      # part directories but no xc7a35t die directory, so the part is served by
+      # the xc7a50t die it aliases to (docs/xilinx-porting/04-gap-assessment.md),
+      # and the case's part.txt resolves to a chipdb we name for the part.
+      - name: Configure
+        run: |
+          cmake -S nextpnr -B build -G Ninja \
+            -DARCH=himbaechel -DHIMBAECHEL_UARCH=xilinx \
+            -DCMAKE_BUILD_TYPE=Release -DBUILD_GUI=OFF -DBUILD_PYTHON=ON \
+            -DHIMBAECHEL_PRJXRAY_DB="$PWD/prjxray-db" \
+            -DHIMBAECHEL_XILINX_DEVICES="xc7a50t;xc7a200t;xc7z010"
+
+      - name: Build nextpnr-himbaechel and the chipdbs
+        run: cmake --build build --target nextpnr-himbaechel -j"$(nproc)"
+
+      - name: Assemble the chipdb directory and the shim
+        run: |
+          set -euo pipefail
+          mkdir -p run/bin run/chipdb
+          cd build/himbaechel/uarch/xilinx
+          # Names regression/run.sh resolves from each case's part.txt.
+          cp chipdb-xc7a200t.bin  ../../../../run/chipdb/xc7a200tfbg484.bin
+          cp chipdb-xc7z010.bin   ../../../../run/chipdb/xc7z010clg400.bin
+          cp chipdb-xc7a50t.bin   ../../../../run/chipdb/xc7a35tcsg324.bin
+          cd ../../../../run
+          install -m 755 ../nextpnr/.github/scripts/nextpnr-xilinx-shim.sh bin/nextpnr-xilinx
+          ls -la bin/chipdb chipdb
+
+      - name: Run the ported cases (blocking)
+        env:
+          PATH: ${{ github.workspace }}/run/bin:${{ env.PATH }}
+          NEXTPNR_HIMBAECHEL_BIN: ${{ github.workspace }}/build/nextpnr-himbaechel
+          CHIPDB_DIR: ${{ github.workspace }}/run/chipdb
+        run: |
+          set -euo pipefail
+          command -v nextpnr-xilinx
+          demo-projects/regression/run.sh \
+            clock-srcc-bufg bram-sdp-unused-port bufg-fabric-driven \
+            config-primitive-startupe2 iddr-four-iff-flops \
+            fdse-fdpe-undefined-init lutram-ram64x1s lutram-clkinv
+
+      # Failing today, on purpose and by name.  Each is a nextpnr-xilinx fix
+      # that the port has not reached; when one is fixed, move it into the
+      # blocking list above rather than deleting the note.
+      - name: Run the cases whose fixes are still outstanding (non-blocking)
+        continue-on-error: true
+        env:
+          PATH: ${{ github.workspace }}/run/bin:${{ env.PATH }}
+          NEXTPNR_HIMBAECHEL_BIN: ${{ github.workspace }}/build/nextpnr-himbaechel
+          CHIPDB_DIR: ${{ github.workspace }}/run/chipdb
+        run: |
+          set -uo pipefail
+          echo "lut_shared_pin      #158: LUT6_2 O5/O6 split -- O5 half lands on a bel without an O5 pin"
+          echo "const-holdout       #184: RAM32M address pins never reachable from the constant net"
+          echo "dsp-const-only-pins #159: DSP const-only pins -- unported in nextpnr-xilinx too (PR #159 open)"
+          demo-projects/regression/run.sh lut_shared_pin const-holdout dsp-const-only-pins
