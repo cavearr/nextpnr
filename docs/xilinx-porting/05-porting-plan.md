@@ -311,3 +311,55 @@ then FASM, then primitive modes), which is the empirically proven order.
 - Upstream CI (archcheck + demos gate) green; non-xilinx arches unaffected.
 - No UltraScale(+) code, device databases, or tooling has been added.
 - Documents 01–04 updated to reflect the final state.
+
+---
+
+## 6. Re-diff against the fork's current main (2026-09)
+
+The plan above took the fork at tag `0.9.3`. Re-diffing at the fork's main
+(`3fd78784`, tag `0.9.6`) gives `git diff --stat 0.9.3..main -- xilinx/` = 14
+files, +1477/−96, and this tree was moved to `main` (`152860f8`, 136 commits
+past the then-checked-out `himbaechel-xilinx-porting`).
+
+**How the remaining gap was measured.** `demo-projects/regression/` already
+holds one case per fixed fork bug, each asserting a property of the FASM or of
+the routed netlist. Running those cases against a build of this tree through
+the fork's CLI shim (`.github/scripts/nextpnr-xilinx-shim.sh`) turns them into
+the porting work list, which is a stronger instrument than reading diffs:
+**9 of the 11 cases pass** as of `49372f4a`.
+
+**Ported and verified by those cases** (commits `b40ce4af`, `49372f4a`):
+
+- `RAM64X1S`: the arm passed the RAM cell's `O` to `create_dram_lut()` without
+  disconnecting it, aborting the packer on any 64-deep single-port memory
+  (`lutram-ram64x1s`, `lutram-clkinv`);
+- the same arm tested `(z - 1) < 0` for "site is full", retiring every slice
+  one LUT early — three slices of three LUT-RAMs instead of two of four
+  (`lutram-ram64x1s`);
+- `write_ffs_config()` took the half-slice clock inversion from the flipflops
+  only, so an inverted LUT-RAM write clock emitted `NOCLKINV`
+  (`lutram-clkinv`);
+- `INIT` defaulted to 0 for every FF, but FDSE/FDPE default to 1, and a
+  present-but-undefined `'x'` INIT read as 0 (`fdse-fdpe-undefined-init`);
+- LUT6_2 was never split, so its `O5` half had no bel pin
+  (`lut_shared_pin`);
+- the LUT-pair legaliser put the `X_ORIG_PORT` separator after each element,
+  producing `"I2I0 "` (`lut_shared_pin`).
+
+`.github/workflows/regression.yml` runs the suite in this repo: the ported
+cases block, the outstanding ones run `continue-on-error` naming their issue.
+
+**Still to port**, each with the failure it produces:
+
+| item | evidence |
+|---|---|
+| ~~`const-holdout` (#184)~~ | **ported** — the routing was never missing: the constant router had already reached all 192 RAM32M address site pins. `check_const_pins.py` read them as unreached because this tree serialised `NEXTPNR_BEL` and `ROUTING` in himbaechel's `<tile>/<site>.<bel>` dialect while the checker parses nextpnr-xilinx's `<site>/<bel>` and `SITEWIRE/<site>/<pin>`. A new `HimbaechelAPI::postRouteArchInfo()` hook, called after `archInfoToAttributes()`, lets the xilinx uarch emit the dialect its tooling reads. An earlier packer-level attempt (a LUT driver for the tied pins) failed the same check for the same reason and was reverted |
+| SRL16E/SRLC32E `INIT` (`1193ed03`) | `get_lut_init()` has no SRL branch, so the INIT never reaches the bitstream; no case yet |
+| BUFIO `IN_USE` (`c52d41b6`) | no `write_bufio`; no case yet |
+| WEMUX half-tile consistency (`ccfae5ae`) | `xilinx_place.cc` checks the half-slice controls but not WE; no case yet |
+| regional-buffer sink regions (`20dc8309`), pad-fed BUFIO/BUFR sites (`f440166f`, `7c4f00df`), duplicate-package-pin warning (`9efb656d`), BUFH/BUFR/BUFIO/BUFMR clock propagation (`13d88882`) | absent from the packer/legaliser |
+| prjxray-db pin | CI pins `ab1fc60c`; the fork's submodule is at `1768fb35` |
+
+`dsp-const-only-pins` (#159) is **not** a blocker: it is red on the fork's main
+too, with the fix unmerged in the fork's PR #159.
+

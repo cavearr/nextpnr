@@ -788,6 +788,64 @@ void XilinxImpl::postRoute()
     }
 }
 
+void XilinxImpl::postRouteArchInfo()
+{
+    // The framework's archInfoToAttributes() serialised NEXTPNR_BEL and
+    // ROUTING in the generic himbaechel form -- a bel as "<tile>/<site>.<bel>"
+    // and a site wire as "<tile>/<site>.<pin>".  The demo-projects regression
+    // checkers were written against nextpnr-xilinx's form instead: a site bel
+    // is "<site>/<bel>" and a site wire is "SITEWIRE/<site>/<pin>".
+    // check_const_pins.py (const-holdout) splits NEXTPNR_BEL on '/' to get the
+    // slice name and the lane letter (the first character of the bel name),
+    // then matches "SITEWIRE/<slice>/<pin>" against each net's ROUTING; under
+    // the generic form the lane letter comes out as the 'S' of "SLICE" and the
+    // site wires never match, so every RAM32M address pin reads as unrouted.
+    for (auto &cell : ctx->cells) {
+        CellInfo *ci = cell.second.get();
+        if (ci->bel == BelId())
+            continue;
+        const SiteIndex site = get_bel_site(ci->bel);
+        // PSEUDO_GND / PSEUDO_VCC and friends sit on bels with no site, so the
+        // unpacked site index is 0xFFFF and must not index the sites array.
+        const bool bel_has_site = site.site >= 0 && site.site < tile_extra_data(site.tile)->sites.ssize();
+        if (bel_has_site)
+            ci->attrs[ctx->id("NEXTPNR_BEL")] = get_site_bel_name(ci->bel).str(ctx);
+    }
+    auto wire_name = [&](WireId wire) -> std::string {
+        const IdString type = ctx->getWireType(wire);
+        const bool is_site_wire = type == id_INTENT_SITE_WIRE || type == id_INTENT_SITE_GND;
+        if (!is_site_wire)
+            return ctx->getWireName(wire).str(ctx);
+        const std::string full = IdString(chip_wire_info(ctx->chip_info, wire).name).str(ctx);
+        const size_t dot = full.find('.');
+        const std::string pin = (dot == std::string::npos) ? full : full.substr(dot + 1);
+        // The chipdb generator stores the owning site's index in a site wire's
+        // flags field (lookup_site_wire sets nw.flags = site.primary.index).
+        const int32_t site_idx = chip_wire_info(ctx->chip_info, wire).flags;
+        const bool site_index_valid = site_idx >= 0 && site_idx < tile_extra_data(wire.tile)->sites.ssize();
+        if (!site_index_valid)
+            return ctx->getWireName(wire).str(ctx);
+        const SiteIndex site(wire.tile, site_idx);
+        return stringf("SITEWIRE/%s/%s", get_site_name(site).c_str(ctx), pin.c_str());
+    };
+    for (auto &net : ctx->nets) {
+        NetInfo *ni = net.second.get();
+        std::string routing;
+        bool first = true;
+        for (auto &item : ni->wires) {
+            if (!first)
+                routing += ";";
+            routing += wire_name(item.first);
+            routing += ";";
+            if (item.second.pip != PipId())
+                routing += ctx->getPipName(item.second.pip).str(ctx);
+            routing += ";" + std::to_string(item.second.strength);
+            first = false;
+        }
+        ni->attrs[ctx->id("ROUTING")] = routing;
+    }
+}
+
 IdString XilinxImpl::bel_tile_type(BelId bel) const
 {
     return IdString(chip_tile_info(ctx->chip_info, bel.tile).type_name);
