@@ -608,14 +608,56 @@ struct FasmBackend
                 lbound = (i == 1) ? 0 : 32;
                 ubound = (i == 1) ? 32 : 64;
             }
+            // SRL16E / SRLC32E: pack_srls() keeps the shift register's own
+            // 16-/32-bit INIT on the SLICE_LUTX cell it creates, but that cell
+            // has no logical LUT inputs to map through X_ORIG_PORT_A1..A6, so
+            // the phys_to_log walk below would leave every bit equal to
+            // init.str.at(0).  Each SRL INIT bit k is stored in the LUT INIT at
+            // both bit 2k and 2k+1 (nextpnr-xilinx#181).  For SRL16E
+            // specifically, pack_srls() ties A6 (LUT address bit 5) to VCC when
+            // the cell sits in the 6LUT position (i==0), so only addresses
+            // [32:64) are ever read -- the fracturable narrowing above selects
+            // that half only when lut5 AND lut6 are BOTH non-null, an unrelated
+            // condition, so override it by position.  SRLC32E ties only A1 and
+            // uses the full 64-bit space regardless of position.
+            std::string orig_type = str_or_default(lut->attrs, id_X_ORIG_TYPE, "");
+            bool lut_is_srl = (orig_type == "SRL16E") || (orig_type == "SRLC32E");
+            if (lut_is_srl) {
+                bool is_srl16e = orig_type == "SRL16E";
+                if (is_srl16e) {
+                    lbound = (i == 1) ? 0 : 32;
+                    ubound = (i == 1) ? 32 : 64;
+                }
+                int width = (ubound - lbound) / 2;
+                Property srl_init = get_or_default(lut->params, id_INIT, Property()).extract(0, width);
+                for (int k = 0; k < width; k++) {
+                    bool bit = (srl_init.str.at(k) == Property::S1);
+                    bits[lbound + 2 * k] = bit;
+                    bits[lbound + 2 * k + 1] = bit;
+                }
+                continue;
+            }
             Property init = get_or_default(lut->params, id_INIT, Property()).extract(0, 64);
             for (int j = lbound; j < ubound; j++) {
                 int log_index = 0;
                 for (int k = 0; k < 6; k++) {
                     if ((j & (1 << k)) == 0)
                         continue;
-                    for (auto &p2l : phys_to_log[k])
-                        log_index |= (1 << log_to_bit[p2l]);
+                    for (auto &p2l : phys_to_log[k]) {
+                        // find(), never operator[]: operator[] inserts a
+                        // missing key with value 0, so an unparseable name was
+                        // silently encoded as if the pin drove I0 -- the LUT
+                        // then received a truth table that is not its function,
+                        // in the bitstream only.  (Port of nextpnr-xilinx
+                        // 7cfd1e90.)
+                        auto lb = log_to_bit.find(p2l);
+                        bool name_not_a_logical_input = lb == log_to_bit.end();
+                        if (name_not_a_logical_input)
+                            log_error("LUT '%s': X_ORIG_PORT_%s names logical input '%s', "
+                                      "which this cell does not have\n",
+                                      ctx->nameOf(lut), phys_inputs[k].c_str(ctx), p2l.c_str());
+                        log_index |= (1 << lb->second);
+                    }
                 }
                 bits[j] = (init.str.at(log_index) == Property::S1);
             }
@@ -2677,6 +2719,28 @@ struct FasmBackend
         push("BUFR_DIVIDE");
         write_bit(divide_feature);
         pop();
+        pop();
+        pop();
+    }
+
+    // A placed BUFIO emits nothing by default, so the buffer is never switched
+    // on.  The clock reaches the site and leaves it through ordinary tile
+    // routing (which write_pip already emits), but the enable is missing:
+    // prjxray-db carries BUFIO_Y0..Y3.IN_USE (two bits per slot) and without
+    // them the bitstream assembles with the bits clear -- dead on silicon, the
+    // same silent failure shape as the RCLK2IO leaf on the BUFR side.  Emitted
+    // from the cell for the same reason as write_bufr: the configuration
+    // belongs to the instance.  (Port of nextpnr-xilinx c52d41b6.)
+    void write_bufio(CellInfo *ci)
+    {
+        // Site name is BUFIO_X0Y<y> and the feature is BUFIO_Y<y>, where the
+        // index is the site's y within its tile -- the same convention BUFR
+        // uses above.
+        auto xy = uarch->rel_site_loc(uarch->get_bel_site(ci->bel));
+
+        push(uarch->tile_name(ci->bel.tile));
+        push("BUFIO_Y" + std::to_string(xy.y));
+        write_bit("IN_USE");
         pop();
         pop();
     }
@@ -4750,6 +4814,9 @@ struct FasmBackend
                 blank();
             } else if (ci->type == id_BUFR_BUFR && is_placed) {
                 write_bufr(ci);
+                blank();
+            } else if (ci->type == id_BUFIO_BUFIO && is_placed) {
+                write_bufio(ci);
                 blank();
             } else if (ci->type == id_GTPE2_COMMON) {
                 write_gtp_pll(ci);

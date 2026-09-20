@@ -354,10 +354,12 @@ cases block, the outstanding ones run `continue-on-error` naming their issue.
 | item | evidence |
 |---|---|
 | ~~`const-holdout` (#184)~~ | **ported** — the routing was never missing: the constant router had already reached all 192 RAM32M address site pins. `check_const_pins.py` read them as unreached because this tree serialised `NEXTPNR_BEL` and `ROUTING` in himbaechel's `<tile>/<site>.<bel>` dialect while the checker parses nextpnr-xilinx's `<site>/<bel>` and `SITEWIRE/<site>/<pin>`. A new `HimbaechelAPI::postRouteArchInfo()` hook, called after `archInfoToAttributes()`, lets the xilinx uarch emit the dialect its tooling reads. An earlier packer-level attempt (a LUT driver for the tied pins) failed the same check for the same reason and was reverted |
-| SRL16E/SRLC32E `INIT` (`1193ed03`) | `get_lut_init()` has no SRL branch, so the INIT never reaches the bitstream; no case yet |
-| BUFIO `IN_USE` (`c52d41b6`) | no `write_bufio`; no case yet |
-| WEMUX half-tile consistency (`ccfae5ae`) | `xilinx_place.cc` checks the half-slice controls but not WE; no case yet |
-| regional-buffer sink regions (`20dc8309`), pad-fed BUFIO/BUFR sites (`f440166f`, `7c4f00df`), duplicate-package-pin warning (`9efb656d`), BUFH/BUFR/BUFIO/BUFMR clock propagation (`13d88882`) | absent from the packer/legaliser |
+| ~~SRL16E/SRLC32E `INIT` (`1193ed03`)~~ | **ported** — `get_lut_init()` writes the SRL's own INIT directly (each bit k at LUT INIT bits 2k and 2k+1, with the SRL16E 6LUT position narrowed to [32:64)); case `srl-init` |
+| ~~X_ORIG_PORT unknown-name guard (`7cfd1e90`)~~ | **ported** — `get_lut_init()` uses `find()` + `log_error()` instead of `operator[]`, so an unknown logical-input name stops the flow instead of encoding as I0; case `xorigport-unknown-name` |
+| ~~WEMUX half-tile consistency (`ccfae5ae`)~~ | **ported** — `xc7_logic_tile_valid()` now stores each memory/SRL LUT's WE net and rejects two cells in a SLICEM half with different WE; case `srl-wemux` |
+| ~~duplicate-package-pin warning (`9efb656d`)~~ | **ported** — `pack_io()` warns when two pads are constrained to one package pin, in the user's names; case `dup-package-pin` (expected-fail: the design is still unplaceable) |
+| BUFIO `IN_USE` (`c52d41b6`) | **code ported, case blocked on the chipdb.** `write_bufio` + the BUFIO packer (`#157`) + pad-fed BUFIO preplacement are in (`bufio-in-use`), but the pad→BUFIO `I2IOCLK` segbits only landed in the fork's prjxray-db 77e52f10 (`f2a469b8`); this tree's chipdb is generated from `ab1fc60c`, whose `segbits_hclk_ioi3.db` has neither the `I2IOCLK` bits nor `BUFIO_Y*.IN_USE`, so the router rejects the path and the design cannot reach a FASM. Enable the case once the chipdb is regenerated |
+| regional-buffer sink regions (`20dc8309`), pad-fed BUFR site (`7c4f00df`), BUFH/BUFR/BUFIO/BUFMR clock propagation (`13d88882`) | absent from the packer/legaliser |
 | prjxray-db pin | CI pins `ab1fc60c`; the fork's submodule is at `1768fb35` |
 
 `dsp-const-only-pins` (#159) is **not** a blocker: it is red on the fork's main

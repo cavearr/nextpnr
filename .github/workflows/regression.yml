@@ -109,7 +109,9 @@ jobs:
           demo-projects/regression/run.sh \
             clock-srcc-bufg bram-sdp-unused-port bufg-fabric-driven \
             config-primitive-startupe2 iddr-four-iff-flops \
-            fdse-fdpe-undefined-init lutram-ram64x1s lutram-clkinv
+            fdse-fdpe-undefined-init lutram-ram64x1s lutram-clkinv \
+            lut_shared_pin const-holdout \
+            srl-init xorigport-unknown-name srl-wemux dup-package-pin
 
       # Failing today, on purpose and by name.  Each is a nextpnr-xilinx fix
       # that the port has not reached; when one is fixed, move it into the
@@ -122,7 +124,7 @@ jobs:
           CHIPDB_DIR: ${{ github.workspace }}/run/chipdb
         run: |
           set -uo pipefail
-          echo "lut_shared_pin      #158: LUT6_2 O5/O6 split -- O5 half lands on a bel without an O5 pin"
-          echo "const-holdout       #184: RAM32M address pins never reachable from the constant net"
-          echo "dsp-const-only-pins #159: DSP const-only pins -- unported in nextpnr-xilinx too (PR #159 open)"
-          demo-projects/regression/run.sh lut_shared_pin const-holdout dsp-const-only-pins
+          echo "bufio-in-use        #167: needs the pad->BUFIO I2IOCLK segbits and BUFIO_Y*.IN_USE,"
+          echo "                        which this pin of prjxray-db lacks (the fork bumped to 77e52f10)"
+          echo "dsp-const-only-pins #159: unported in nextpnr-xilinx too (PR #159 open)"
+          demo-projects/regression/run.sh bufio-in-use dsp-const-only-pins

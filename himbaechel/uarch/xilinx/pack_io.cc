@@ -337,6 +337,7 @@ void XC7Packer::pack_io()
     }
     flush_cells();
     pool<BelId> used_io_bels;
+    dict<std::string, std::string> io_bel_owner; // bel name -> IO cell name
     for (auto &iob : pad_and_buf) {
         CellInfo *pad = iob.first;
         // Process location constraints
@@ -352,8 +353,28 @@ void XC7Packer::pack_io()
             log_info("    Constraining '%s' to pad '%s'\n", pad->name.c_str(ctx), ctx->nameOfBel(bel));
             pad->attrs[id_BEL] = std::string(ctx->nameOfBel(bel));
         }
-        if (pad->attrs.count(id_BEL)) {
-            used_io_bels.insert(ctx->getBelByNameStr(pad->attrs.at(id_BEL).as_string()));
+        // A pad whose site is already fixed (by LOC/PACKAGE_PIN) is the only
+        // kind that can collide with another pad: an unconstrained one is
+        // handed a free bel elsewhere.  Two ports (or one port twice) on one
+        // package pin therefore collide here, and only one can actually reach
+        // the pad -- say so in the names the user wrote, before the placer
+        // reports it as a bel collision between $iopadmap$... cells.
+        // (Port of nextpnr-xilinx 9efb656d, fixes #8.)
+        bool pad_site_fixed = pad->attrs.count(id_BEL) != 0;
+        if (pad_site_fixed) {
+            const std::string bel_name = pad->attrs.at(id_BEL).as_string();
+            auto owner = io_bel_owner.find(bel_name);
+            bool site_already_claimed = owner != io_bel_owner.end();
+            if (site_already_claimed) {
+                const std::string loc =
+                        pad->attrs.count(id_LOC) ? pad->attrs.at(id_LOC).as_string() : std::string("?");
+                log_warning("Conflicting outputs: IO '%s' and IO '%s' are both constrained to package pin '%s' "
+                            "(site '%s'); only one of them can drive the pad\n",
+                            pad->name.c_str(ctx), owner->second.c_str(), loc.c_str(), bel_name.c_str());
+            } else {
+                io_bel_owner.emplace(bel_name, pad->name.str(ctx));
+            }
+            used_io_bels.insert(ctx->getBelByNameStr(bel_name));
         }
     }
     // Constrain unconstrained IO

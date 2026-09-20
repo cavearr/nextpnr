@@ -219,6 +219,13 @@ void XC7Packer::prepare_clocking()
         } else if (ci->type == id_BUFR) {
             // BUFR pins (I/CE/CLR/O) match the BUFR_BUFR bel one-to-one
             ci->type = id_BUFR_BUFR;
+        } else if (ci->type == id_BUFIO) {
+            // BUFIO is the undivided I/O clock buffer: a BUFIO_BUFIO bel with
+            // just I and O, no CE/CLR to tie off.  Without this branch the cell
+            // reaches the placer still typed BUFIO, no bel of that type exists,
+            // and the run dies with "no Bels remaining of type 'BUFIO'" while
+            // the BUFIO_BUFIO sites sit unused.  (Port of nextpnr-xilinx #157.)
+            ci->type = id_BUFIO_BUFIO;
         }
     }
 }
@@ -295,6 +302,8 @@ void XC7Packer::preplace_clocking()
             else if (ci->type == id_BUFG_BUFG)
                 did_something |= try_preplace(ci, id_I);
             else if (ci->type == id_BUFHCE_BUFHCE)
+                did_something |= try_preplace(ci, id_I);
+            else if (ci->type == id_BUFIO_BUFIO)
                 did_something |= try_preplace(ci, id_I);
             else if (ci->type.in(id_MMCM_MMCM_TOP, id_PLL_PLL_TOP, id_PLLE2_ADV_PLLE2_ADV, id_MMCME2_ADV_MMCME2_ADV))
                 did_something |= try_preplace(ci, id_CLKIN1);
