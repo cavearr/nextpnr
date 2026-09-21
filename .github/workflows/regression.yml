@@ -68,7 +68,12 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake ninja-build libeigen3-dev python3 yosys
+          # Mirrors the dependency set .github/workflows/arch_ci.yml installs
+          # for its himbaechel build: without libboost-all-dev, configure fails
+          # on Boost_INCLUDE_DIR/program_options/iostreams, and without
+          # python3-dev the python bindings have no headers to build against.
+          sudo apt-get install -y build-essential cmake ninja-build \
+            libboost-all-dev python3-dev libeigen3-dev pkg-config yosys
 
       # xc7a35t is deliberately absent: the openXC7 prjxray-db has Artix-35T
       # part directories but no xc7a35t die directory, so the part is served by
