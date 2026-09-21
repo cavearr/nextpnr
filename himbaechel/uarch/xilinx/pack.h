@@ -218,6 +218,11 @@ struct XC7Packer : public XilinxPacker
     void pack_plls();
     void pack_gbs();
     void preplace_clocking();
+    // Bind every pad-fed BUFIO/BUFR to the one site its pad can reach, and
+    // keep each such buffer's sinks inside the clock region it drives; run
+    // from pack_gbs(), after pack_io() has placed the pads.
+    void constrain_bufios();
+    void constrain_regional_clock_sinks(CellInfo *buf);
     void pack_clocking();
 
     // BRAM

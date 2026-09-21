@@ -133,7 +133,7 @@ env:
   # Pinned to make the gate reproducible: the chipdb is generated from
   # prjxray-db and the frames from prjxray's fasm2frames, so a moving
   # database or tool revision would change what is measured.
-  PRJXRAY_DB_REV: ab1fc60c38a0dc1bc1d3d495f3189b25ae971e04
+  PRJXRAY_DB_REV: 77e52f10dafbf5a9eaf55e7a5ff86af84279cd2a
   # virtex7-capable fasm2frames, used for every family; see header
   PRJXRAY_REV: e1302fc6f8662a237e42790073fa641f2d9f1371
   # demo-projects commit carrying the five pre-synthesized .json netlists

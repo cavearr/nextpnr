@@ -36,7 +36,7 @@ permissions:
 env:
   # The database the chipdbs are generated from, and the demo-projects commit
   # carrying the cases.  Pinned, because the chipdb decides what the cases do.
-  PRJXRAY_DB_REV: ab1fc60c38a0dc1bc1d3d495f3189b25ae971e04
+  PRJXRAY_DB_REV: 77e52f10dafbf5a9eaf55e7a5ff86af84279cd2a
   DEMO_PROJECTS_REV: main
 
 jobs:
@@ -111,7 +111,8 @@ jobs:
             config-primitive-startupe2 iddr-four-iff-flops \
             fdse-fdpe-undefined-init lutram-ram64x1s lutram-clkinv \
             lut_shared_pin const-holdout \
-            srl-init xorigport-unknown-name srl-wemux dup-package-pin
+            srl-init xorigport-unknown-name srl-wemux dup-package-pin \
+            bufio-in-use bufr-pad-site bufr-sink-region bufh-clock-constraint
 
       # Failing today, on purpose and by name.  Each is a nextpnr-xilinx fix
       # that the port has not reached; when one is fixed, move it into the
@@ -124,7 +125,5 @@ jobs:
           CHIPDB_DIR: ${{ github.workspace }}/run/chipdb
         run: |
           set -uo pipefail
-          echo "bufio-in-use        #167: needs the pad->BUFIO I2IOCLK segbits and BUFIO_Y*.IN_USE,"
-          echo "                        which this pin of prjxray-db lacks (the fork bumped to 77e52f10)"
           echo "dsp-const-only-pins #159: unported in nextpnr-xilinx too (PR #159 open)"
-          demo-projects/regression/run.sh bufio-in-use dsp-const-only-pins
+          demo-projects/regression/run.sh dsp-const-only-pins

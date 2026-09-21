@@ -1310,5 +1310,19 @@ void XilinxImpl::pack()
     packer.pack_ffs();
     packer.finalise_muxfs();
     packer.pack_lutffs();
+
+    // Now that LUT-FF clusters exist, keep the sinks of every placed regional
+    // buffer (BUFIO/BUFR) inside the clock region that buffer drives.  The
+    // placer positions a cluster by its root, so the region must land on the
+    // root -- walked inside constrain_regional_clock_sinks -- not on the
+    // pre-cluster FF, which is why this runs after pack_lutffs() rather than
+    // in constrain_bufios() alongside the bel binding.
+    for (auto &cell : ctx->cells) {
+        CellInfo *ci = cell.second.get();
+        const bool is_regional_buffer = ci->type == id_BUFIO_BUFIO || ci->type == id_BUFR_BUFR;
+        const bool buffer_is_placed = ci->bel != BelId();
+        if (is_regional_buffer && buffer_is_placed)
+            packer.constrain_regional_clock_sinks(ci);
+    }
 }
 NEXTPNR_NAMESPACE_END
