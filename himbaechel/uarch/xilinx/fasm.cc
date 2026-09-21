@@ -2982,11 +2982,13 @@ struct FasmBackend
         // The most significant two bits seem to be zero, so let us just truncate them
         const size_t mask_size = 48;
         std::vector<bool> mask_vector(mask_size, true);
-        bool mask_found = boolvec_populate(ci->params, ctx->id("MASK"), mask_vector);
-        if (mask_found) {
-            mask_vector.resize(46);
-            write_vector("MASK[45:0]", mask_vector);
-        }
+        // The primitive's default MASK is all ones, and Vivado writes it out
+        // even when the netlist does not mention it -- yosys never does.
+        // Leaving it unwritten is a zero mask, which is a different pattern
+        // detector.
+        boolvec_populate(ci->params, ctx->id("MASK"), mask_vector);
+        mask_vector.resize(46);
+        write_vector("MASK[45:0]", mask_vector);
 
         auto sel_mask = str_or_default(ci->params, ctx->id("SEL_MASK"), "MASK");
         if (sel_mask == "C")
