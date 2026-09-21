@@ -310,14 +310,31 @@ void XilinxPacker::pack_dram()
             for (auto cell : group.second) {
                 NPNR_ASSERT(cell->type == id_RAM64X1S); // FIXME
 
-                if (z == (height - 1) || (z - 1) < 0) {
-                    z = (height - 1);
+                // A full site means the next cell starts a fresh one, which
+                // the placer places anywhere, as the RAM64X1D path does.
+                // Testing z - 1 here left the bottom LUT of every site
+                // unused, so a 64-deep memory was spread over three slices
+                // holding three LUT-RAMs each instead of two holding four --
+                // the shape the packer's own regression case
+                // (demo-projects/regression/lutram-ram64x1s) asserts against.
+                const bool site_is_full = (z < 0);
+                if (site_is_full) {
+                    z = height - 1;
                     base = nullptr;
                 }
 
                 std::vector<NetInfo *> address(cs.wa.begin(), cs.wa.begin() + std::min<size_t>(cs.wa.size(), 6));
-                CellInfo *ram = create_dram_lut(cell->name.str(ctx) + "/ADDR", base, cs, address, cell->getPort(id_D),
-                                                cell->getPort(id_O), z);
+                // The replacement LUT drives this net, so the RAM cell that
+                // drives it today has to let go first: connectPort() asserts
+                // that a net's output has no other driver, and without this
+                // the packer aborts on any design that infers a 64-deep
+                // single-port memory (yosys memory_libmap emits RAM64X1S for
+                // it), which is the shape demo-projects/regression/
+                // lutram-ram64x1s and lutram-clkinv both reach.
+                NetInfo *o = cell->getPort(id_O);
+                cell->disconnectPort(id_O);
+                CellInfo *ram = create_dram_lut(cell->name.str(ctx) + "/ADDR", base, cs, address, cell->getPort(id_D), o,
+                                                z);
                 if (cell->params.count(id_INIT))
                     ram->params[id_INIT] = cell->params[id_INIT];
                 if (base == nullptr)

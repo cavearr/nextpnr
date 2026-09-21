@@ -119,6 +119,8 @@ struct XilinxPacker
     // LUTs & FFs
     void pack_inverters();
     void pack_luts();
+    std::vector<std::pair<IdString, IdString>> split_lut6_2();
+    void constrain_lut6_2_pairs(const std::vector<std::pair<IdString, IdString>> &pairs);
     void pack_ffs();
     bool can_add_ff_to_cluster(const CellInfo *lut, const CellInfo *ff);
     void pack_lutffs();
@@ -216,6 +218,11 @@ struct XC7Packer : public XilinxPacker
     void pack_plls();
     void pack_gbs();
     void preplace_clocking();
+    // Bind every pad-fed BUFIO/BUFR to the one site its pad can reach, and
+    // keep each such buffer's sinks inside the clock region it drives; run
+    // from pack_gbs(), after pack_io() has placed the pads.
+    void constrain_bufios();
+    void constrain_regional_clock_sinks(CellInfo *buf);
     void pack_clocking();
 
     // BRAM

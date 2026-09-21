@@ -145,6 +145,11 @@ struct HimbaechelAPI
     virtual void postPlace() {};
     virtual void preRoute() {};
     virtual void postRoute() {};
+    // Called after the framework's archInfoToAttributes() at the end of
+    // route(), so a uarch can rewrite the serialised NEXTPNR_BEL / ROUTING
+    // attributes into its own canonical form (the xilinx uarch uses the
+    // nextpnr-xilinx "SITEWIRE/<site>/<pin>" encoding).  Default: no-op.
+    virtual void postRouteArchInfo() {};
 
     // For custom placer configuration
     virtual void configurePlacerHeap(PlacerHeapCfg &cfg) {};

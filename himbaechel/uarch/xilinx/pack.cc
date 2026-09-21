@@ -181,6 +181,164 @@ void XilinxPacker::pack_luts()
     generic_xform(lut_rules, true);
 }
 
+// A LUT6_2 drives two outputs (O5 and O6) and so needs two bels -- the 5LUT and
+// the 6LUT of one slice -- but a nextpnr cell occupies exactly one bel.
+// Inheriting the LUT6 transform rule only renames a port called "O", and LUT6_2
+// has no such port, so O5 kept no bel pin and routing aborted with
+// "No wire found for port O5".
+//
+// Split each LUT6_2 into two ordinary LUT cells, one per output. When both
+// halves are five-input functions, constrain_lut6_2_pairs() puts them back on
+// the 6LUT and 5LUT of a single site, so the LUT6_2 still costs one LUT.
+std::vector<std::pair<IdString, IdString>> XilinxPacker::split_lut6_2()
+{
+    std::vector<std::pair<IdString, IdString>> pairs;
+    std::vector<CellInfo *> to_split;
+    for (auto &cell : ctx->cells)
+        if (cell.second->type == id_LUT6_2)
+            to_split.push_back(cell.second.get());
+    if (to_split.empty())
+        return pairs;
+
+    for (CellInfo *ci : to_split) {
+        NetInfo *o5 = ci->getPort(id_O5);
+        NetInfo *o6 = ci->getPort(id_O6);
+        NetInfo *i5 = ci->getPort(id_I5);
+        Property init = get_or_default(ci->params, id_INIT, Property()).extract(0, 64);
+
+        const bool both_outputs_used = (o5 != nullptr) && (o6 != nullptr);
+        // A BEL pin names one physical resource for what is about to become two
+        // independent cells. That is fine while only one output is used -- the
+        // lone surviving half inherits it below -- but with both driven there
+        // is no rule for which half should get it.
+        const bool bel_constrained_with_both_outputs_used = (ci->attrs.count(id_BEL) != 0) && both_outputs_used;
+        if (bel_constrained_with_both_outputs_used)
+            log_error("LUT6_2 cell '%s' has a BEL constraint but drives both O5 and O6; splitting it in two "
+                      "would leave that constraint ambiguous\n",
+                      ci->name.c_str(ctx));
+
+        // One LUT<n_in> cell driving `out`, its INIT the 2^n_in-bit slice of
+        // the LUT6_2 INIT starting at bit `lo`.
+        auto make_half = [&](const char *suffix, NetInfo *out, int n_in, int lo) {
+            if (out == nullptr)
+                return;
+            IdString half_name = ctx->id(ci->name.str(ctx) + suffix);
+            const bool half_name_collides = (ctx->cells.count(half_name) != 0);
+            if (half_name_collides)
+                log_error("splitting LUT6_2 cell '%s' would create cell '%s', which already exists\n",
+                          ci->name.c_str(ctx), half_name.c_str(ctx));
+            CellInfo *half = create_cell(ctx->idf("LUT%d", n_in), half_name);
+            for (int i = 0; i < n_in; i++) {
+                IdString p = ctx->idf("I%d", i);
+                NetInfo *in = ci->getPort(p);
+                const bool input_is_unused = (in == nullptr);
+                if (input_is_unused)
+                    continue;
+                const bool half_lacks_this_input = (half->ports.count(p) == 0);
+                if (half_lacks_this_input)
+                    half->addInput(p);
+                half->connectPort(p, in);
+            }
+            const bool half_lacks_an_output = (half->ports.count(id_O) == 0);
+            if (half_lacks_an_output)
+                half->addOutput(id_O);
+            half->connectPort(id_O, out);
+            half->params[id_INIT] = init.extract(lo, 1 << n_in);
+            // A region is a bounding box and applies to both halves equally.
+            half->region = ci->region;
+            const bool bel_constrained = (ci->attrs.count(id_BEL) != 0);
+            if (bel_constrained)
+                half->attrs[id_BEL] = ci->attrs.at(id_BEL);
+        };
+
+        if (o5 != nullptr)
+            ci->disconnectPort(id_O5);
+        if (o6 != nullptr)
+            ci->disconnectPort(id_O6);
+
+        // O5 is always a five-input function of I0..I4, taken from INIT[31:0].
+        make_half("$LUT5", o5, 5, 0);
+
+        // O6 depends on I5. A constant I5 folds away and keeps O6 five-input,
+        // so that both halves draw the same I0..I4 nets and can share a site.
+        const bool i5_is_gnd = (i5 != nullptr) && (i5->name == ctx->id("$PACKER_GND_NET"));
+        const bool i5_is_vcc = (i5 != nullptr) && (i5->name == ctx->id("$PACKER_VCC_NET"));
+        const bool i5_is_constant = (i5 == nullptr) || i5_is_gnd || i5_is_vcc;
+        // An unused or grounded I5 leaves O6 a five-input function of I0..I4;
+        // a tied-high one takes the upper half of the INIT.
+        const bool o6_is_a_five_input_function = (i5 == nullptr) || i5_is_gnd;
+        if (o6_is_a_five_input_function)
+            make_half("$LUT6", o6, 5, 0);
+        else if (i5_is_vcc)
+            make_half("$LUT6", o6, 5, 32);
+        else
+            make_half("$LUT6", o6, 6, 0);
+
+        // Only a five-input O6 can share the site with the O5 half: a genuine
+        // six-input O6 needs A6, which a 5LUT bel does not have.
+        const bool the_two_halves_can_share_a_site = both_outputs_used && i5_is_constant;
+        if (the_two_halves_can_share_a_site)
+            pairs.emplace_back(ctx->id(ci->name.str(ctx) + "$LUT6"), ctx->id(ci->name.str(ctx) + "$LUT5"));
+
+        packed_cells.insert(ci->name);
+    }
+
+    flush_cells();
+    log_info("    split %d LUT6_2 cell(s) into LUT5/LUT6 pairs\n", int(to_split.size()));
+    return pairs;
+}
+
+// Constrain each (lut6, lut5) pair onto the 6LUT and 5LUT of one site, so that
+// a LUT6_2 still costs a single physical LUT.
+//
+// Runs after pack_luts(): that maps every LUT output to O6, but a 5LUT bel has
+// only O5, so a 5LUT-constrained cell would have no legal site and placement
+// would abort. Renaming the O5 half's output first is what makes the
+// constraint placeable at all.
+void XilinxPacker::constrain_lut6_2_pairs(const std::vector<std::pair<IdString, IdString>> &pairs)
+{
+    for (auto &p : pairs) {
+        const bool pair_survived_packing = (ctx->cells.count(p.first) != 0) && (ctx->cells.count(p.second) != 0);
+        if (!pair_survived_packing)
+            continue;
+        CellInfo *lut6 = ctx->cells.at(p.first).get();
+        CellInfo *lut5 = ctx->cells.at(p.second).get();
+        const bool pair_is_luts = (lut6->type == id_SLICE_LUTX) && (lut5->type == id_SLICE_LUTX);
+        if (!pair_is_luts)
+            continue;
+        // Either half may already carry a constraint from an earlier pass, such
+        // as constrain_muxf_tree(). Overwriting constr_parent would desync it
+        // from the constr_children list it still sits in, so leave such a pair
+        // unpaired rather than corrupt an existing constraint.
+        // himbaechel names a cluster on its root and points the children at it,
+        // so "already constrained" means a foreign cluster name, or a z/child
+        // of its own.
+        const bool lut6_already_constrained = (lut6->cluster != IdString() && lut6->cluster != lut6->name) ||
+                                             lut6->constr_abs_z || !lut6->constr_children.empty();
+        const bool lut5_already_constrained = (lut5->cluster != IdString() && lut5->cluster != lut5->name) ||
+                                             lut5->constr_abs_z || !lut5->constr_children.empty();
+        const bool pair_is_already_constrained = lut6_already_constrained || lut5_already_constrained;
+        if (pair_is_already_constrained)
+            continue;
+
+        lut5->renamePort(id_O6, id_O5);
+        lut5->attrs.erase(ctx->id("X_ORIG_PORT_O6"));
+        lut5->attrs[ctx->id("X_ORIG_PORT_O5")] = std::string("O");
+
+        // Both halves carry the same nets on A1..A5, which is what lets them
+        // share the fractured LUT's input sitewires.
+        const bool lut6_has_no_cluster_name = (lut6->cluster == IdString());
+        if (lut6_has_no_cluster_name)
+            lut6->cluster = lut6->name;
+        lut5->cluster = lut6->name;
+        lut6->constr_children.push_back(lut5);
+        lut5->constr_x = 0;
+        lut5->constr_y = 0;
+        lut5->constr_abs_z = false;
+        lut5->constr_z = BEL_5LUT - BEL_6LUT;
+    }
+}
+
 void XilinxPacker::pack_ffs()
 {
     log_info("Packing flipflops..\n");
@@ -1140,12 +1298,31 @@ void XilinxImpl::pack()
     packer.pack_muxfs();
     packer.pack_carries();
     packer.pack_srls();
+    // Split LUT6_2 cells before the LUT transform: each half's INIT is a slice
+    // of the LUT6_2's own INIT, and the pair constraint has to run after
+    // pack_luts() has turned the halves into SLICE_LUTX cells.
+    auto lut6_2_pairs = packer.split_lut6_2();
     packer.pack_luts();
+    packer.constrain_lut6_2_pairs(lut6_2_pairs);
     packer.pack_dram();
     packer.pack_bram();
     packer.pack_dsps();
     packer.pack_ffs();
     packer.finalise_muxfs();
     packer.pack_lutffs();
+
+    // Now that LUT-FF clusters exist, keep the sinks of every placed regional
+    // buffer (BUFIO/BUFR) inside the clock region that buffer drives.  The
+    // placer positions a cluster by its root, so the region must land on the
+    // root -- walked inside constrain_regional_clock_sinks -- not on the
+    // pre-cluster FF, which is why this runs after pack_lutffs() rather than
+    // in constrain_bufios() alongside the bel binding.
+    for (auto &cell : ctx->cells) {
+        CellInfo *ci = cell.second.get();
+        const bool is_regional_buffer = ci->type == id_BUFIO_BUFIO || ci->type == id_BUFR_BUFR;
+        const bool buffer_is_placed = ci->bel != BelId();
+        if (is_regional_buffer && buffer_is_placed)
+            packer.constrain_regional_clock_sinks(ci);
+    }
 }
 NEXTPNR_NAMESPACE_END

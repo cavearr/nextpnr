@@ -219,6 +219,13 @@ void XC7Packer::prepare_clocking()
         } else if (ci->type == id_BUFR) {
             // BUFR pins (I/CE/CLR/O) match the BUFR_BUFR bel one-to-one
             ci->type = id_BUFR_BUFR;
+        } else if (ci->type == id_BUFIO) {
+            // BUFIO is the undivided I/O clock buffer: a BUFIO_BUFIO bel with
+            // just I and O, no CE/CLR to tie off.  Without this branch the cell
+            // reaches the placer still typed BUFIO, no bel of that type exists,
+            // and the run dies with "no Bels remaining of type 'BUFIO'" while
+            // the BUFIO_BUFIO sites sit unused.  (Port of nextpnr-xilinx #157.)
+            ci->type = id_BUFIO_BUFIO;
         }
     }
 }
@@ -279,6 +286,11 @@ void XC7Packer::pack_gbs()
         if (ci->type.in(id_PSEUDO_GND, id_PSEUDO_VCC))
             preplace_unique(ci);
     }
+
+    // A BUFIO/BUFR is a regional I/O clock buffer rather than a global one,
+    // but this is where the clock buffers get their bels and it has to run
+    // after pack_io() has placed the pads it reads.
+    constrain_bufios();
 }
 
 void XC7Packer::preplace_clocking()
@@ -300,6 +312,162 @@ void XC7Packer::preplace_clocking()
                 did_something |= try_preplace(ci, id_CLKIN1);
         }
     } while (did_something);
+}
+
+// A BUFIO is not placed wherever there is room: it is placed where the pad
+// says.  Its I pin has no fabric input at all -- the only wire that reaches it
+// is the I2IOCLK leg its own clock-capable pad drives into the HCLK_IOI tile --
+// so of the four BUFIO_BUFIO bels of a tile exactly ONE is reachable from a
+// given pad.  A pad-fed BUFR carries the identical constraint, for the same
+// reason.  Ask the routing graph which bel the pad reaches -- the same pip BFS
+// find_bel_with_short_route() runs for a BUFG -- and constrain the cell to it.
+// A table of pad->site pairs would answer the same question for artix7 today
+// and be wrong for the next family; the graph is per-part data and already
+// knows.
+void XC7Packer::constrain_bufios()
+{
+    const pool<IdString> inbuf_types{id_IOB33M_INBUF_EN, id_IOB33S_INBUF_EN, id_IOB33_INBUF_EN,
+                                     id_IOB18_INBUF_DCIEN, id_IOB18M_INBUF_DCIEN};
+    for (auto &cell : ctx->cells) {
+        CellInfo *ci = cell.second.get();
+        const bool is_regional_buffer = ci->type == id_BUFIO_BUFIO || ci->type == id_BUFR_BUFR;
+        if (!is_regional_buffer)
+            continue;
+
+        NetInfo *clk = ci->getPort(id_I);
+        const bool has_driven_input = clk != nullptr && clk->driver.cell != nullptr;
+        if (!has_driven_input)
+            continue;
+
+        CellInfo *drv = clk->driver.cell;
+        // Only a pad fixes the site.  A regional buffer driven by an MMCM/PLL
+        // output, or by anything else, enters the tile through a different
+        // DMUX leg and is left exactly as it was.  pack_io() has already given
+        // every input buffer its bel by now, which is what makes the pad
+        // knowable this early.
+        const bool driven_by_input_buffer = inbuf_types.count(drv->type) > 0;
+        const bool driver_is_placed = drv->bel != BelId();
+        if (!driven_by_input_buffer || !driver_is_placed)
+            continue;
+
+        WireId drv_wire = ctx->getBelPinWire(drv->bel, clk->driver.port);
+        const bool pad_has_an_output_wire = drv_wire != WireId();
+        if (!pad_has_an_output_wire)
+            continue;
+
+        BelId dedicated = find_bel_with_short_route(drv_wire, ci->type, id_I);
+        // No site reachable: the pad is not clock-capable.  Leave that to the
+        // router, whose message names the two ends of the arc it could not
+        // build; guessing a site here would only move the failure.
+        const bool pad_reaches_a_bufio = dedicated != BelId();
+        if (!pad_reaches_a_bufio)
+            continue;
+
+        // A site the user (or an earlier pass) already bound wins; leave it,
+        // and its sinks, exactly as they were.
+        const bool already_bound = ci->bel != BelId();
+        if (already_bound)
+            continue;
+
+        ctx->bindBel(dedicated, ci, STRENGTH_LOCKED);
+        log_info("    Constrained %s '%s' to bel '%s' (dedicated site of the pad at %s)\n", ci->type.c_str(ctx),
+                 ctx->nameOf(ci), ctx->nameOfBel(dedicated), ctx->nameOfBel(drv->bel));
+    }
+}
+
+// Binding the buffer to the right site fixes the arc into it.  The arc out of
+// it is a separate problem: a regional buffer drives one clock region, and
+// nothing tells the placer that the flops it clocks have to live there.  The
+// placer does not cost global nets, so the flops follow whatever data pin they
+// touch -- to an LED half a die away -- and the router then dies on the clock.
+// Ask the graph where the clock actually arrives, exactly as the site search
+// above does, and hand the placer that rectangle.  Deriving it from geometry
+// would mean encoding how tall a clock region is per family; the routing graph
+// is per-part data and already knows.
+void XC7Packer::constrain_regional_clock_sinks(CellInfo *buf)
+{
+    NetInfo *clk = buf->getPort(id_O);
+    const bool clk_has_sinks = clk != nullptr && !clk->users.empty();
+    if (!clk_has_sinks)
+        return;
+
+    const bool buf_is_placed = buf->bel != BelId();
+    if (!buf_is_placed)
+        return;
+
+    WireId src = ctx->getBelPinWire(buf->bel, id_O);
+    const bool buf_has_an_output_wire = src != WireId();
+    if (!buf_has_an_output_wire)
+        return;
+
+    // Same effort cap and the same layer-by-layer walk as
+    // find_bel_with_short_route(); here we want every bel the clock reaches
+    // rather than the nearest one, so the walk runs to exhaustion.
+    const size_t max_visit = 1000000;
+    pool<WireId> visited;
+    visited.insert(src);
+    std::vector<WireId> frontier{src};
+    bool any = false;
+    int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+    while (!frontier.empty() && visited.size() < max_visit) {
+        for (WireId w : frontier) {
+            for (auto bp : ctx->getWireBelPins(w)) {
+                // Only where the clock can actually clock something.  Counting
+                // every bel pin the walk touches returns the whole die: a wire
+                // brushing some bel's data input says nothing about the clock
+                // reaching its CLK, and the resulting rectangle was the whole
+                // die -- no constraint at all.
+                const bool pin_is_a_clock = bp.pin == id_CLK;
+                if (!pin_is_a_clock)
+                    continue;
+                Loc l = ctx->getBelLocation(bp.bel);
+                const bool first_clock_pin = !any;
+                if (first_clock_pin) {
+                    x0 = x1 = l.x;
+                    y0 = y1 = l.y;
+                    any = true;
+                } else {
+                    x0 = std::min(x0, l.x);
+                    x1 = std::max(x1, l.x);
+                    y0 = std::min(y0, l.y);
+                    y1 = std::max(y1, l.y);
+                }
+            }
+        }
+        std::vector<WireId> next_frontier;
+        for (WireId w : frontier)
+            for (auto pip : ctx->getPipsDownhill(w)) {
+                WireId dst = ctx->getPipDstWire(pip);
+                const bool already_visited = visited.count(dst) > 0;
+                if (already_visited)
+                    continue;
+                visited.insert(dst);
+                next_frontier.push_back(dst);
+            }
+        frontier.swap(next_frontier);
+    }
+    const bool clock_reaches_a_bel = any;
+    if (!clock_reaches_a_bel)
+        return;
+
+    IdString rname = ctx->id("clkregion_" + buf->name.str(ctx));
+    ctx->createRectangularRegion(rname, x0, y0, x1, y1);
+    int n = 0;
+    for (auto &usr : clk->users) {
+        // A cell already inside a placement cluster is positioned relative to
+        // its root, so constrain the root and let the cluster follow it.
+        CellInfo *tgt = usr.cell;
+        const bool tgt_is_in_a_cluster = tgt->cluster != IdString();
+        if (tgt_is_in_a_cluster)
+            tgt = ctx->getClusterRootCell(tgt->cluster);
+        const bool sink_unconstrained = tgt->region == nullptr;
+        if (sink_unconstrained) {
+            ctx->constrainCellToRegion(tgt->name, rname);
+            ++n;
+        }
+    }
+    log_info("    Constrained %d sink(s) of %s '%s' to its clock region x%d..%d y%d..%d\n", n, buf->type.c_str(ctx),
+             ctx->nameOf(buf), x0, x1, y0, y1);
 }
 
 void XC7Packer::pack_clocking()
@@ -574,7 +742,7 @@ void XilinxPacker::generate_constraints()
         pool<IdString> changed_cells;
         for (auto net : changed_nets) {
             for (auto &user : ctx->nets.at(net)->users)
-                if (user.port.in(id_CLKIN1, id_I0, id_PAD))
+                if (user.port.in(id_CLKIN1, id_I0, id_I1, id_I, id_PAD))
                     changed_cells.insert(user.cell->name);
         }
         changed_nets.clear();
@@ -582,6 +750,22 @@ void XilinxPacker::generate_constraints()
             CellInfo *ci = ctx->cells.at(cell).get();
             if (ci->type == id_BUFGCTRL) {
                 copy_constraint(ci, id_I0, id_O, 1);
+                copy_constraint(ci, id_I1, id_O, 1);
+            } else if (ci->type.in(id_BUFHCE_BUFHCE, id_BUFIO_BUFIO, id_BUFMRCE)) {
+                copy_constraint(ci, id_I, id_O, 1);
+            } else if (ci->type == id_BUFR_BUFR) {
+                std::string div = str_or_default(ci->params, ctx->id("BUFR_DIVIDE"), "BYPASS");
+                double ratio = 1.0;
+                if (div != "BYPASS") {
+                    try {
+                        ratio = 1.0 / std::stod(div);
+                    } catch (...) {
+                        log_warning("    BUFR '%s': unrecognised BUFR_DIVIDE '%s', assuming BYPASS for the "
+                                    "constraint\n",
+                                    ci->name.c_str(ctx), div.c_str());
+                    }
+                }
+                copy_constraint(ci, id_I, id_O, ratio);
             } else if (ci->type.in(id_IOB33M_INBUF_EN, id_IOB33S_INBUF_EN, id_IOB33_INBUF_EN, id_IOB18_INBUF_DCIEN,
                                    id_IOB18M_INBUF_DCIEN)) {
                 copy_constraint(ci, id_PAD, id_OUT, 1);
@@ -629,6 +813,26 @@ void XilinxPacker::generate_constraints()
                                                      (ci->type == id_MMCME2_ADV_MMCME2_ADV && i == 0) ? "_F" : ""),
                                             1)));
                 }
+                // The MMCM's secondary (inverted) outputs CLKOUT0B..3B run at
+                // their primary output's rate.
+                if (ci->type == id_MMCME2_ADV_MMCME2_ADV) {
+                    for (int i = 0; i <= 3; i++) {
+                        auto port = ctx->idf("CLKOUT%dB", i);
+                        if (!ci->getPort(port))
+                            continue;
+                        set_constraint(ci, port,
+                                       simple_clk_contraint(vco_period *
+                                                            float_or_default(
+                                                                    ci,
+                                                                    ctx->idf("CLKOUT%d_DIVIDE%s", i,
+                                                                             (i == 0) ? "_F" : ""),
+                                                                    1)));
+                    }
+                }
+                // CLKFBOUT (and CLKFBOUTB on the MMCM) run at the VCO rate.
+                set_constraint(ci, ctx->id("CLKFBOUT"), simple_clk_contraint(vco_period));
+                if (ci->type == id_MMCME2_ADV_MMCME2_ADV)
+                    set_constraint(ci, ctx->id("CLKFBOUTB"), simple_clk_contraint(vco_period));
             }
         }
     }

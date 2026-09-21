@@ -500,6 +500,38 @@ bool XilinxImpl::xc7_logic_tile_valid(IdString tile_type, const LogicTileStatus 
                     }
                 }
             }
+            // The WEMUX driving the SRL/DRAM WE pin is shared across the
+            // bottom half of a SLICEM, so all memory/SRL cells in that half
+            // must agree on the WE net.  Without this check, two SRLs/DRAMs
+            // from independent write-enable domains can both be placed into
+            // the same SLICEM half and then fail routing on
+            // SITEWIRE/SLICE_*/WEMUX_OUT.  (Port of nextpnr-xilinx ccfae5ae,
+            // from gatecat/nextpnr-xilinx#98.)
+            if (i == 0) {
+                NetInfo *we = nullptr;
+                for (int z = 4 * i; z < 4 * (i + 1); z++) {
+                    for (int k = 0; k < 2; k++) {
+                        auto lut = get_tags(lts.cells[z << 4 | (BEL_6LUT + k)]);
+                        bool lut_is_absent = lut == nullptr;
+                        if (lut_is_absent)
+                            continue;
+                        bool lut_is_not_memory_or_srl = !lut->lut.is_memory && !lut->lut.is_srl;
+                        if (lut_is_not_memory_or_srl)
+                            continue;
+                        bool lut_has_no_we = lut->lut.we == nullptr;
+                        if (lut_has_no_we)
+                            continue;
+                        bool we_not_yet_recorded = we == nullptr;
+                        bool we_disagrees_with_recorded = we != lut->lut.we;
+                        if (we_not_yet_recorded) {
+                            we = lut->lut.we;
+                        } else if (we_disagrees_with_recorded) {
+                            DBG();
+                            return false;
+                        }
+                    }
+                }
+            }
             NetInfo *clk = nullptr, *sr = nullptr, *ce = nullptr;
             bool clkinv = false, srinv = false, islatch = false, ffsync = false;
             for (int z = 4 * i; z < 4 * (i + 1); z++) {
@@ -812,7 +844,8 @@ void XilinxImpl::fixup_routing()
                     auto &orig_attr = lut6->attrs[ctx->idf("X_ORIG_PORT_%s", p.c_str(ctx))].str;
                     bool first = true;
                     for (auto &nc : new_connections.at(p)) {
-                        orig_attr += orig_ports_l6[nc] + (first ? "" : " ");
+                        const std::string separator = first ? "" : " ";
+                        orig_attr += separator + orig_ports_l6[nc];
                         first = false;
                     }
                     if (orig_attr.empty())
@@ -827,7 +860,8 @@ void XilinxImpl::fixup_routing()
                     auto &orig_attr = lut5->attrs[ctx->idf("X_ORIG_PORT_%s", p.c_str(ctx))].str;
                     bool first = true;
                     for (auto &nc : new_connections.at(p)) {
-                        orig_attr += orig_ports_l5[nc] + (first ? "" : " ");
+                        const std::string separator = first ? "" : " ";
+                        orig_attr += separator + orig_ports_l5[nc];
                         first = false;
                     }
                     if (orig_attr.empty())

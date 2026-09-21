@@ -316,6 +316,7 @@ bool Arch::route()
     uarch->postRoute();
     getCtx()->settings[getCtx()->id("route")] = 1;
     archInfoToAttributes();
+    uarch->postRouteArchInfo();
     set_fast_pip_delays(false);
     return result;
 }
