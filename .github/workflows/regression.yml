@@ -105,11 +105,14 @@ jobs:
 
       - name: Run the ported cases (blocking)
         env:
-          PATH: ${{ github.workspace }}/run/bin:${{ env.PATH }}
           NEXTPNR_HIMBAECHEL_BIN: ${{ github.workspace }}/build/nextpnr-himbaechel
           CHIPDB_DIR: ${{ github.workspace }}/run/chipdb
         run: |
           set -euo pipefail
+          # Prepend, rather than setting PATH in env: ${{ env.PATH }} is empty
+          # there, which leaves the shim's own /usr/bin/env bash unfindable and
+          # the step dying with exit 127 before any case runs.
+          export PATH="$PWD/run/bin:$PATH"
           command -v nextpnr-xilinx
           demo-projects/regression/run.sh \
             clock-srcc-bufg bram-sdp-unused-port bufg-fabric-driven \
@@ -125,10 +128,10 @@ jobs:
       - name: Run the cases whose fixes are still outstanding (non-blocking)
         continue-on-error: true
         env:
-          PATH: ${{ github.workspace }}/run/bin:${{ env.PATH }}
           NEXTPNR_HIMBAECHEL_BIN: ${{ github.workspace }}/build/nextpnr-himbaechel
           CHIPDB_DIR: ${{ github.workspace }}/run/chipdb
         run: |
           set -uo pipefail
+          export PATH="$PWD/run/bin:$PATH"
           echo "dsp-const-only-pins #159: unported in nextpnr-xilinx too (PR #159 open)"
           demo-projects/regression/run.sh dsp-const-only-pins
