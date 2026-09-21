@@ -37,7 +37,7 @@ env:
   # The database the chipdbs are generated from, and the demo-projects commit
   # carrying the cases.  Pinned, because the chipdb decides what the cases do.
   PRJXRAY_DB_REV: 77e52f10dafbf5a9eaf55e7a5ff86af84279cd2a
-  DEMO_PROJECTS_REV: main
+  DEMO_PROJECTS_REV: e7429b5635ff77de9452aa31aef2462285691397
 
 jobs:
   regression:
@@ -101,7 +101,7 @@ jobs:
           cp chipdb-xc7a50t.bin   ../../../../run/chipdb/xc7a35tcsg324.bin
           cd ../../../../run
           install -m 755 ../nextpnr/.github/scripts/nextpnr-xilinx-shim.sh bin/nextpnr-xilinx
-          ls -la bin/chipdb chipdb
+          ls -la bin chipdb
 
       - name: Run the ported cases (blocking)
         env:
