@@ -2233,6 +2233,12 @@ struct FasmBackend
                     write_bit(std::string("RAMB36.BRAM36_") + width + "_1", odd_width);
                 }
             }
+            // Ported from nextpnr-xilinx f0975539. Vivado sets both offsets
+            // to all-ones on a used tile whose lower half is occupied.
+            if (ci != nullptr) {
+                write_vector("ZALMOST_EMPTY_OFFSET[12:0]", std::vector<bool>(13, true));
+                write_vector("ZALMOST_FULL_OFFSET[12:0]", std::vector<bool>(13, true));
+            }
         }
         pop();
     }
