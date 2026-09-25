@@ -1021,15 +1021,25 @@ void XC7Packer::pack_iologic()
             fold_inverter(ci, "CLKB");
             fold_inverter(ci, "OCLKB");
 
-            // OFB loopback: D driven by an OSERDESE2's OFB output (no IOB /
-            // IDELAYE2 driver); placed together with its OSERDESE2 in the
-            // unconstrained pass below.
+            // OFB loopback: the data path is the partner OSERDESE2's OFB
+            // output, so the cell has no IOB / IDELAYE2 to anchor on and is
+            // bound next to its OSERDESE2 in the unconstrained pass below.
+            // Two shapes exist: the OSERDESE2's OFB drives the ISERDESE2's D,
+            // or it drives the ISERDESE2's OFB input while D and DDLY are
+            // deliberately left open -- the DDR3 read-calibration training
+            // ISERDES, exactly as Xilinx's DDR3 PHY example (and Vivado)
+            // instantiates it.
             {
                 NetInfo *d_ofb = ci->getPort(id_D);
-                bool d_driven_by_oserdes_ofb = d_ofb && d_ofb->driver.cell &&
-                                               d_ofb->driver.cell->type == id_OSERDESE2 &&
-                                               d_ofb->driver.port == id_OFB;
-                if (d_driven_by_oserdes_ofb)
+                const bool d_driven_by_oserdes_ofb = d_ofb && d_ofb->driver.cell &&
+                                                     d_ofb->driver.cell->type == id_OSERDESE2 &&
+                                                     d_ofb->driver.port == id_OFB;
+                NetInfo *ofb_in = ci->getPort(id_OFB);
+                const bool ofb_input_driven_by_oserdes_ofb =
+                        ofb_in && ofb_in->driver.cell && ofb_in->driver.cell->type == id_OSERDESE2 &&
+                        ofb_in->driver.port == id_OFB;
+                const bool data_comes_from_oserdes_ofb = d_driven_by_oserdes_ofb || ofb_input_driven_by_oserdes_ofb;
+                if (data_comes_from_oserdes_ofb)
                     continue;
             }
 
