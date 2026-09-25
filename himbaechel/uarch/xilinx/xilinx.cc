@@ -118,16 +118,55 @@ void XilinxImpl::init_database(Arch *arch)
     arch->set_speed_grade("DEFAULT");
 }
 
+// prjxray names a bel "<site type>_<bel name>"; where the primitive is named
+// after its site type the chipdb bel type is the primitive name twice, e.g.
+// RAMB18E1_RAMB18E1 (or, as in IDELAYE2_FINEDELAY_IDELAYE2_FINEDELAY, an
+// already compound name twice).  Fold such a bel type onto the primitive name
+// it repeats.
+static IdString primitive_name_of_bel_type(Context *ctx, IdString bel_type)
+{
+    const std::string &name = bel_type.str(ctx);
+    const size_t half = name.size() / 2;
+    const bool has_a_middle_separator = half != 0 && (name.size() % 2) == 1 && name[half] == '_';
+    const bool second_half_repeats_the_first =
+            has_a_middle_separator && name.compare(0, half, name, half + 1, half) == 0;
+    if (!second_half_repeats_the_first)
+        return bel_type;
+    return ctx->id(name.substr(0, half));
+}
+
 void XilinxImpl::init(Context *ctx)
 {
     h.init(ctx);
     HimbaechelAPI::init(ctx);
+
+    // Resolve the repeated-name bel types once (the placer looks buckets up per
+    // cell); everything else buckets as its own type.
+    for (auto bel : ctx->getBels()) {
+        IdString bel_type = ctx->getBelType(bel);
+        IdString primitive_name = primitive_name_of_bel_type(ctx, bel_type);
+        const bool bel_type_repeats_its_primitive = primitive_name != bel_type;
+        if (bel_type_repeats_its_primitive)
+            primitive_bucket_for_bel_type.emplace(bel_type, primitive_name);
+    }
 
     tile_status.resize(ctx->chip_info->tile_insts.size());
     for (int i = 0; i < ctx->chip_info->tile_insts.ssize(); i++) {
         auto extra_data = tile_extra_data(i);
         tile_status.at(i).site_variant.resize(extra_data->sites.ssize());
     }
+}
+
+IdString XilinxImpl::getBelBucketForCellType(IdString cell_type) const
+{
+    auto bucket = primitive_bucket_for_bel_type.find(cell_type);
+    const bool type_is_a_repeated_primitive = bucket != primitive_bucket_for_bel_type.end();
+    return type_is_a_repeated_primitive ? bucket->second : cell_type;
+}
+
+IdString XilinxImpl::getBelBucketForBel(BelId bel) const
+{
+    return getBelBucketForCellType(ctx->getBelType(bel));
 }
 
 SiteIndex XilinxImpl::get_bel_site(BelId bel) const

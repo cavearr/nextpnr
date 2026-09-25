@@ -134,6 +134,12 @@ struct XilinxImpl : HimbaechelAPI
 
     void init(Context *ctx) override;
 
+    // Chipdb bel types that repeat their primitive name (RAMB18E1_RAMB18E1,
+    // from prjxray's "<site type>_<bel name>" naming) bucket as the primitive,
+    // so utilisation, reports and placer logs name the primitive.
+    IdString getBelBucketForCellType(IdString cell_type) const override;
+    IdString getBelBucketForBel(BelId bel) const override;
+
     // Bels
     void notifyBelChange(BelId bel, CellInfo *cell) override;
     void update_logic_bel(BelId bel, CellInfo *cell);
@@ -245,6 +251,9 @@ struct XilinxImpl : HimbaechelAPI
 
   private:
     HimbaechelHelpers h;
+    // Bel types (bel_type -> primitive name) whose chipdb name repeats the
+    // primitive; lookups happen per cell on the placer's hot path.
+    dict<IdString, IdString> primitive_bucket_for_bel_type;
     void assign_cell_tags();
     void index_control_sets();
 };
