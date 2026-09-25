@@ -2845,7 +2845,8 @@ struct FasmBackend
 
     void write_ibufds_gte2(CellInfo * ci)
     {
-        push(uarch->tile_name(ci->bel.tile));
+        const std::string tile_name = uarch->tile_name(ci->bel.tile);
+        push(tile_name);
         Loc siteLoc = uarch->rel_site_loc(uarch->get_bel_site(ci->bel));
         push("IBUFDS_GTE2_Y" + std::to_string(siteLoc.y));
         write_bit("IN_USE");
@@ -2877,13 +2878,20 @@ struct FasmBackend
                                        ci->hierpath.c_str(ctx), ci->name.c_str(ctx));
         write_bit("CLKRCV_TRST", clkrcv_trst);
         pop();
-        // The input swing setting lives in the tile under the GTXE2_COMMON
+        // The input swing setting lives in the tile under the COMMON segment
         // prefix even though it belongs to this buffer, and it was only ever
         // written by the GTXE2_COMMON writer.  A design using the per-channel
         // CPLL instantiates no GTXE2_COMMON at all -- which is the whole point
         // of the open SGMII PHY -- so its reference clock came out with no
         // swing configured.
-        push("GTXE2_COMMON");
+        //
+        // The segment is GTXE2_COMMON on a GTX tile but GTPE2_COMMON on a GTP
+        // one, and the database has no GTXE2_COMMON key under a GTP_COMMON
+        // tile.  Hardcoding the GTX name therefore emitted an undeclared
+        // feature for every Artix-7 GTP design, which fasm2frames rejects with
+        // FasmLookupError (and fpga-as with an aborted map lookup).
+        const bool tile_is_gtp = boost::starts_with(tile_name, "GTP_COMMON");
+        push(tile_is_gtp ? "GTPE2_COMMON" : "GTXE2_COMMON");
         write_int_vector("IBUFDS_GTE2.CLKSWING_CFG[1:0]",
                          int_or_default(ci->params, ctx->id("CLKSWING_CFG"), 3), 2);
         pop(2);
