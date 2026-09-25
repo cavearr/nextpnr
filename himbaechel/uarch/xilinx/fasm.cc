@@ -863,11 +863,13 @@ struct FasmBackend
                     continue;
                 const bool lut_clkinv = bool_or_default(lut->params, id_IS_WCLK_INVERTED, false);
                 const bool mem_disagrees = found_mem && (lut_clkinv != mem_clkinv);
-                if (mem_disagrees)
+                if (mem_disagrees) {
+                    const std::string bel_name = ctx->getBelName(lut->bel).str(ctx);
                     log_error("FASM: LUT-RAM '%s' (type %s) at bel %s disagrees with its half-slice on "
                               "'IS_WCLK_INVERTED' (tile %s) -- control-set contention in the placement\n",
-                              lut->name.c_str(ctx), lut->type.c_str(ctx), ctx->getBelName(lut->bel).str(ctx),
+                              lut->name.c_str(ctx), lut->type.c_str(ctx), bel_name.c_str(),
                               tname.c_str());
+                }
                 mem_clkinv = lut_clkinv;
                 found_mem = true;
             }
