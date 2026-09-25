@@ -22,6 +22,7 @@ set(SOURCES
 )
 
 set(TEST_SOURCES
+    tests/bel_bucket_test.cc
     tests/pack_test.cc
 )
 
