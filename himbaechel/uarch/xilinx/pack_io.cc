@@ -1149,7 +1149,8 @@ void XC7Packer::pack_idelayctrl()
             ioctrl_sites.insert(get_ioctrl_site(ctx->getBelByNameStr(ci->attrs.at(id_X_IO_BEL).as_string())));
         }
     }
-    if (ioctrl_sites.empty()) {
+    const bool design_has_no_iodelays = ioctrl_sites.empty();
+    if (design_has_no_iodelays) {
         // An IDELAYCTRL in a design with no I/ODELAYs is useless but legal --
         // Vivado places it and drives RDY rather than rejecting the design, and a
         // design can legitimately arrive in that state after optimisation removed
