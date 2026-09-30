@@ -215,7 +215,8 @@ BelId Arch::getBelByName(IdStringList name) const
     // that an aborting lookup never lets run. The bel half below already
     // returns BelId() on a miss; the tile half needs the same guard.
     auto tile_it = tile_name2idx.find(name[0]);
-    if (tile_it == tile_name2idx.end())
+    const bool tile_name_is_unknown = (tile_it == tile_name2idx.end());
+    if (tile_name_is_unknown)
         return BelId();
     const int tile = tile_it->second;
     const auto &tdata = chip_tile_info(chip_info, tile);
@@ -354,7 +355,8 @@ WireId Arch::getWireByName(IdStringList name) const
     // Same guard as getBelByName: unknown tile means empty WireId, not an
     // uncaught dict::at().
     auto tile_it = tile_name2idx.find(name[0]);
-    if (tile_it == tile_name2idx.end())
+    const bool tile_name_is_unknown = (tile_it == tile_name2idx.end());
+    if (tile_name_is_unknown)
         return WireId();
     const int tile = tile_it->second;
     const auto &tdata = chip_tile_info(chip_info, tile);
@@ -376,7 +378,8 @@ PipId Arch::getPipByName(IdStringList name) const
     // Same guard as getBelByName: unknown tile means empty PipId, not an
     // uncaught dict::at().
     auto tile_it = tile_name2idx.find(name[0]);
-    if (tile_it == tile_name2idx.end())
+    const bool tile_name_is_unknown = (tile_it == tile_name2idx.end());
+    if (tile_name_is_unknown)
         return PipId();
     const int tile = tile_it->second;
     const auto &tdata = chip_tile_info(chip_info, tile);
