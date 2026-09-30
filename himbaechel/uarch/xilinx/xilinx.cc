@@ -1195,7 +1195,7 @@ void XilinxImpl::apply_prerouted()
 void XilinxImpl::postRoute()
 {
     // Insert feedthrough buffers on hold-violating arcs and reroute, before
-    // routing is finalised and FASM is written.  No-op unless --xilinx-hold-fix.
+    // routing is finalised and FASM is written.  No-op unless -o hold-fix.
     fixup_hold();
     fixup_routing();
     ctx->assignArchInfo();
