@@ -431,9 +431,11 @@ void XilinxPacker::pack_dram()
                             create_dram32_lut(cell->name.str(ctx) + "/RAM32X1S" + std::to_string(i) + "/SP", base, cs,
                                               address, di, dout, (i == 0), z);
                     IdString init_param = ctx->idf("INIT_0%d", i);
-                    if (cell->params.count(init_param))
+                    const bool has_init_for_bit = cell->params.count(init_param);
+                    if (has_init_for_bit)
                         ram_lut->params[id_INIT] = cell->params[init_param];
-                    if (base == nullptr)
+                    const bool ram_lut_is_site_base = (base == nullptr);
+                    if (ram_lut_is_site_base)
                         base = ram_lut;
                 }
                 z--;
@@ -460,9 +462,11 @@ void XilinxPacker::pack_dram()
                 NetInfo *o = cell->getPort(id_O);
                 cell->disconnectPort(id_O);
                 CellInfo *ram = create_dram32_lut(cell->name.str(ctx) + "/SP", base, cs, address, di, o, false, z);
-                if (cell->params.count(id_INIT))
+                const bool has_init = cell->params.count(id_INIT);
+                if (has_init)
                     ram->params[id_INIT] = cell->params[id_INIT];
-                if (base == nullptr)
+                const bool ram_is_site_base = (base == nullptr);
+                if (ram_is_site_base)
                     base = ram;
                 z--;
                 packed_cells.insert(cell->name);
