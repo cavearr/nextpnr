@@ -2517,18 +2517,31 @@ struct FasmBackend
             auto is_clkout0 = name == "CLKOUT0";
             auto is_clkfbout = name == "CLKFBOUT";
 
-            if ((is_clkout0 || is_clkfbout) && frac != 0) {
-                --high;
-                --low;
-
-                auto frac_shifted = frac >> 1;
+            // Fractional divide, as Vivado programs it (measured over DIVIDE_F = 2.125..127.875
+            // for CLKOUT0 and CLKFBOUT): the integer counter splits on the parity of the integer
+            // part, and the fall of the fractional output goes to the CLKOUT5 (CLKOUT0) or
+            // CLKOUT6 (CLKFBOUT) fractional registers.
+            const bool is_fractional_counter = (is_clkout0 || is_clkfbout) && frac != 0;
+            bool frac_wf_r = false;
+            if (is_fractional_counter) {
+                const int integer_part = int(floor(divide));
+                const bool integer_part_odd = integer_part & 1;
+                const bool one_eighth = frac == 1;
+                const bool integer_part_above_three = integer_part >= 4;
+                if (integer_part_odd) {
+                    high = (integer_part - 1) / 2;
+                    low = one_eighth ? high - 1 : high;
+                } else {
+                    high = low = integer_part / 2 - 1;
+                }
+                edge = integer_part_odd;
+                frac_wf_r = !integer_part_odd;
+                const bool frac_wf_f = integer_part_odd ? one_eighth : !(one_eighth && integer_part_above_three);
+                const int frac_phase_mux_f = 4 * integer_part_odd + (frac >> 1);
                 // CLKOUT0 controls CLKOUT5_CLKOUT2, CLKFBOUT controls CLKOUT6_CLKOUT2
                 std::string frac_conf_name = is_clkout0 ? "CLKOUT5_CLKOUT2_" : "CLKOUT6_CLKOUT2_";
-
-                if (1 <= frac_shifted) {
-                    write_bit(frac_conf_name + "FRACTIONAL_FRAC_WF_F[0]");
-                    write_int_vector(frac_conf_name + "FRACTIONAL_PHASE_MUX_F[1:0]", frac_shifted, 2);
-                }
+                write_bit(frac_conf_name + "FRACTIONAL_FRAC_WF_F[0]", frac_wf_f);
+                write_int_vector(frac_conf_name + "FRACTIONAL_PHASE_MUX_F[2:0]", frac_phase_mux_f, 3);
             }
 
             write_bit(name + "_CLKOUT1_OUTPUT_ENABLE[0]");
@@ -2552,7 +2565,7 @@ struct FasmBackend
 
             if (!is_clkout_5_or_6 && frac != 0) {
                 write_bit(name + "_CLKOUT2_FRAC_EN[0]", 1);
-                write_bit(name + "_CLKOUT2_FRAC_WF_R[0]", 1);
+                write_bit(name + "_CLKOUT2_FRAC_WF_R[0]", frac_wf_r);
                 write_int_vector(name + "_CLKOUT2_FRAC[2:0]", frac, 3);
             }
         }
