@@ -1723,7 +1723,7 @@ struct FasmBackend
                 write_bit("IS_" + d + "_INVERTED",
                           bool_or_default(ci->params, ctx->id("IS_" + d + "_INVERTED"), false));
 
-            auto init = int_or_default(ci->params, id_INIT, 1);
+            auto init = int_or_default(ci->params, id_INIT, 0);
             if (init == 0)
                 write_bit("ZINIT_OQ");
 
