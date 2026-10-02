@@ -1166,7 +1166,18 @@ void XC7Packer::pack_bram()
                 ci->connectPort(p, ctx->nets[ctx->id("$PACKER_VCC_NET")].get());
             }
         } else if (ci->type == id_RAMB36E1_RAMB36E1) {
-            for (auto p : {id_ADDRARDADDRL15, id_ADDRBWRADDRL15}) {
+            for (auto &a15 : {std::make_pair(id_ADDRARDADDRL15, "RAM_EXTENSION_A"),
+                              std::make_pair(id_ADDRBWRADDRL15, "RAM_EXTENSION_B")}) {
+                IdString p = a15.first;
+                // Address bit 15 is unused by a RAMB36E1 on its own, and tied
+                // high.  In a cascaded pair (RAM_EXTENSION LOWER/UPPER) it is
+                // what picks the LOWER or the UPPER block (UG473), so it keeps
+                // its net: tying it high would fold the 64K memory onto 32K.
+                std::string extension = str_or_default(ci->params, ctx->id(a15.second), "NONE");
+                const bool port_is_cascaded = extension == "LOWER" || extension == "UPPER";
+                const bool a15_has_a_net = ci->getPort(p) != nullptr;
+                if (port_is_cascaded && a15_has_a_net)
+                    continue;
                 if (!ci->ports.count(p)) {
                     ci->ports[p].name = p;
                     ci->ports[p].type = PORT_IN;
