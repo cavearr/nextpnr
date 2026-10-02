@@ -2321,11 +2321,44 @@ struct FasmBackend
             return prop.as_int64();
     }
 
+    // Counter settings of one divider, as Vivado 2026.1 programs them (measured against it for
+    // DIVIDE 2..128 x DUTY_CYCLE 0.05..0.95 x PHASE -360..360 in the PLL and the MMCM).  HIGH and LOW
+    // follow the duty cycle at half-cycle resolution (EDGE is the half cycle), clamped so each phase
+    // keeps at least one cycle; the six bit fields drop the 64 of a 128 divide exactly as Vivado does.
+    // The phase is in eighths of a VCO period: the MMCM rounds to the nearest eighth, the PLL
+    // truncates and saturates at 511; a negative phase is taken modulo 360.
+    struct ClkoutCounter
+    {
+        int high = 1, low = 1, phasemux = 0, delaytime = 0;
+        bool no_count = false, edge = false;
+    };
+
+    ClkoutCounter calc_clkout_counter(double divide, double duty, double phase, bool is_mmcm)
+    {
+        ClkoutCounter counter;
+        const bool is_bypassed = divide <= 1;
+        if (is_bypassed) {
+            counter.no_count = true;
+            return counter;
+        }
+        const int integer_divide = int(floor(divide));
+        const int duty_fixed = int(round(duty * 100000));
+        const int half_cycles_high = (2 * integer_divide * duty_fixed + 50000) / 100000;
+        const int half_cycles = std::max(2, std::min(half_cycles_high, 2 * integer_divide - 1));
+        counter.high = half_cycles / 2;
+        counter.low = integer_divide - counter.high;
+        counter.edge = half_cycles & 1;
+        const double phase_normalized = phase < 0 ? phase + 360 : phase;
+        const double eighths = phase_normalized / 360 * divide * 8;
+        const int phase_eighths = is_mmcm ? int(floor(eighths + 0.5)) : std::min(int(floor(eighths)), 511);
+        counter.phasemux = phase_eighths % 8;
+        counter.delaytime = phase_eighths / 8;
+        return counter;
+    }
+
     void write_pll_clkout(const std::string &name, CellInfo *ci)
     {
-        // FIXME: variable duty cycle
-        int high = 1, low = 1, phasemux = 0, delaytime = 0, frac = 0;
-        bool no_count = false, edge = false;
+        int frac = 0;
         double divide = float_or_default(ci, name + ((name == "CLKFBOUT") ? "_MULT" : "_DIVIDE"), 1);
         // Xilinx's default for every *_PHASE attribute is 0.0 degrees, not 1.
         // With the old default of 1, a PLL whose RTL omits CLKFBOUT_PHASE got
@@ -2333,19 +2366,12 @@ struct FasmBackend
         // so we emitted CLKFBOUT_CLKOUT1_PHASE_MUX = 001 and shifted the
         // FEEDBACK clock by an eighth of a VCO period.  Vivado emits 0.
         double phase = float_or_default(ci, name + "_PHASE", 0);
-        if (divide <= 1) {
-            no_count = true;
-        } else {
-            high = floor(divide / 2);
-            low = int(floor(divide) - high);
-            if (high != low)
-                edge = true;
-            if (name == "CLKOUT1" || name == "CLKFBOUT")
-                frac = floor(divide * 8) - floor(divide) * 8;
-            int phase_eights = floor((phase / 360) * divide * 8);
-            phasemux = phase_eights % 8;
-            delaytime = phase_eights / 8;
-        }
+        double duty = float_or_default(ci, name + "_DUTY_CYCLE", 0.5);
+        const ClkoutCounter counter = calc_clkout_counter(divide, duty, phase, false);
+        const int high = counter.high, low = counter.low, phasemux = counter.phasemux, delaytime = counter.delaytime;
+        const bool edge = counter.edge, no_count = counter.no_count;
+        if (divide > 1 && (name == "CLKOUT1" || name == "CLKFBOUT"))
+            frac = floor(divide * 8) - floor(divide) * 8;
         bool used = false;
         if (name == "DIVCLK" || name == "CLKFBOUT") {
             used = true;
@@ -2476,31 +2502,31 @@ struct FasmBackend
         pop(2);
     }
 
-    void write_mmcm_clkout(const std::string &name, CellInfo *ci)
+    // The counter of an MMCME2 output from its CLKOUTn_DIVIDE(_F) / CLKFBOUT_MULT_F, DUTY_CYCLE and PHASE.
+    ClkoutCounter calc_mmcm_clkout_counter(const std::string &name, CellInfo *ci, double &divide)
     {
-        // FIXME: variable duty cycle
-        int high = 1, low = 1, phasemux = 0, delaytime = 0, frac = 0;
-        bool no_count = false, edge = false;
-        double divide = float_or_default(
+        divide = float_or_default(
                 ci, name + ((name == "CLKFBOUT") ? "_MULT_F" : (name == "CLKOUT0" ? "_DIVIDE_F" : "_DIVIDE")), 1);
         // Xilinx's default for every *_PHASE attribute is 0.0 degrees, not 1;
         // the PLL writer above was corrected, this is the matching MMCM fix
         // (nextpnr-xilinx#191).  An unset CLKOUT*_PHASE otherwise shifts the
         // clock by an eighth of a VCO period.
-        double phase = float_or_default(ci, name + "_PHASE", 0);
-        if (divide <= 1) {
-            no_count = true;
-        } else {
-            high = floor(divide / 2);
-            low = int(floor(divide) - high);
-            if (high != low)
-                edge = true;
-            if (name == "CLKOUT0" || name == "CLKFBOUT")
-                frac = floor(divide * 8) - floor(divide) * 8;
-            int phase_eights = floor((phase / 360) * divide * 8);
-            phasemux = phase_eights % 8;
-            delaytime = phase_eights / 8;
-        }
+        const double phase = float_or_default(ci, name + "_PHASE", 0);
+        const double duty = float_or_default(ci, name + "_DUTY_CYCLE", 0.5);
+        return calc_clkout_counter(divide, duty, phase, true);
+    }
+
+    void write_mmcm_clkout(const std::string &name, CellInfo *ci)
+    {
+        int frac = 0;
+        double divide;
+        const ClkoutCounter counter = calc_mmcm_clkout_counter(name, ci, divide);
+        int high = counter.high, low = counter.low;
+        const int phasemux = counter.phasemux, delaytime = counter.delaytime;
+        const bool edge = counter.edge;
+        const bool no_count = counter.no_count;
+        if (divide > 1 && (name == "CLKOUT0" || name == "CLKFBOUT"))
+            frac = floor(divide * 8) - floor(divide) * 8;
         bool used = false;
         if (name == "DIVCLK" || name == "CLKFBOUT") {
             used = true;
@@ -2521,6 +2547,7 @@ struct FasmBackend
             // for CLKOUT0 and CLKFBOUT): the integer counter splits on the parity of the integer
             // part, and the fall of the fractional output goes to the CLKOUT5 (CLKOUT0) or
             // CLKOUT6 (CLKFBOUT) fractional registers.
+            // EDGE stays what the duty cycle gives for the integer part (the odd/even split at 50 %).
             const bool is_fractional_counter = (is_clkout0 || is_clkfbout) && frac != 0;
             bool frac_wf_r = false;
             if (is_fractional_counter) {
@@ -2534,10 +2561,10 @@ struct FasmBackend
                 } else {
                     high = low = integer_part / 2 - 1;
                 }
-                edge = integer_part_odd;
                 frac_wf_r = !integer_part_odd;
                 const bool frac_wf_f = integer_part_odd ? one_eighth : !(one_eighth && integer_part_above_three);
-                const int frac_phase_mux_f = 4 * integer_part_odd + (frac >> 1);
+                // the fall moves with the phase: PHASE_MUX_F = (base + phase in eighths) mod 8
+                const int frac_phase_mux_f = (4 * integer_part_odd + (frac >> 1) + phasemux) & 7;
                 // CLKOUT0 controls CLKOUT5_CLKOUT2, CLKFBOUT controls CLKOUT6_CLKOUT2
                 std::string frac_conf_name = is_clkout0 ? "CLKOUT5_CLKOUT2_" : "CLKOUT6_CLKOUT2_";
                 write_bit(frac_conf_name + "FRACTIONAL_FRAC_WF_F[0]", frac_wf_f);
