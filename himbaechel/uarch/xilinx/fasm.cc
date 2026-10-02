@@ -1687,11 +1687,20 @@ struct FasmBackend
             // The IFF is physically a four-flop block shared with ISERDESE2;
             // an IDDR only exposes Q1/Q2, so Q3/Q4 were left unwritten -- and
             // on silicon that is observable (outputs read the wrong value
-            // despite programmed INIT).  IDDR has no INIT_Q3/Q4 parameters,
-            // so those default to 0.  (Port of nextpnr-xilinx d455ae52.)
+            // despite programmed INIT).  IDDR has no INIT_Q3/Q4 parameters;
+            // Vivado derives them from the mode (measured with a Vivado build
+            // of an IDDR for every mode and every INIT_Q1/INIT_Q2): Q3 and Q4
+            // copy INIT_Q1 and INIT_Q2 in SAME_EDGE and SAME_EDGE_PIPELINED,
+            // and are 1 in OPPOSITE_EDGE.  (Port of nextpnr-xilinx d455ae52.)
+            const bool q3_q4_copy_q1_q2 = edge != "OPPOSITE_EDGE";
+            int init_q[5] = {0, 0, 0, 0, 0};
+            for (int i = 1; i <= 2; i++)
+                init_q[i] = int_or_default(ci->params, ctx->id("INIT_Q" + std::to_string(i)), 0);
+            init_q[3] = q3_q4_copy_q1_q2 ? init_q[1] : 1;
+            init_q[4] = q3_q4_copy_q1_q2 ? init_q[2] : 1;
             for (int i = 1; i <= 4; i++) {
-                auto init = int_or_default(ci->params, ctx->id("INIT_Q" + std::to_string(i)), 0);
-                if (init == 0)
+                const bool init_is_zero = init_q[i] == 0;
+                if (init_is_zero)
                     write_bit("IFF.ZINIT_Q" + std::to_string(i));
             }
 
