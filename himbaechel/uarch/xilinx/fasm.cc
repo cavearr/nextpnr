@@ -1556,6 +1556,11 @@ struct FasmBackend
             bool is_hp_lvds_slave_half = is_hp_bank && iostandard == "LVDS" && yLoc == 1;
             if (is_hp_lvds_slave_half)
                 write_bit("LVCMOS12_LVCMOS15_LVCMOS18_SSTL12_SSTL135_SSTL15.IN_ONLY");
+            // The same holds for LVDS_25 on a high-range bank: the slave half
+            // is input-only, as it already is for TMDS_33 below.
+            const bool is_hr_lvds25_slave_half = !is_hp_bank && is_lvds25 && yLoc == 1;
+            if (is_hr_lvds25_slave_half)
+                write_bit("LVCMOS12_LVCMOS15_LVCMOS18_LVCMOS25_LVCMOS33_LVDS_25_LVTTL_SSTL135_SSTL15_TMDS_33.IN_ONLY");
             if (is_tmds33 && yLoc == 1) {
                 if (pad->attrs.count(id_IN_TERM))
                     write_bit("IN_TERM." + pad->attrs.at(id_IN_TERM).as_string());
@@ -1580,10 +1585,13 @@ struct FasmBackend
         // OUT_DIFF belongs to the pseudo-differential outputs (DIFF_SSTL*),
         // whose S half is really driven through the inverter.  A true LVDS
         // driver on a high-performance bank is enabled by IOB_Y0.LVDS.OUT
-        // instead, and a reference bitstream for one sets no OUT_DIFF.
+        // instead, and a reference bitstream for one sets no OUT_DIFF.  The
+        // same holds for LVDS_25 and TMDS_33 on a high-range bank
+        // (IOB_Y0.LVDS_25.OUT / IOB_Y0.TMDS_33.OUT).
         bool output_inverter_used = inv != BelId() && ctx->getBoundBelCell(inv) != nullptr;
         bool is_true_hp_lvds_driver = is_hp_bank && iostandard == "LVDS";
-        if (output_inverter_used && !is_true_hp_lvds_driver)
+        bool is_true_hr_diff_driver = !is_hp_bank && (is_lvds25 || is_tmds33);
+        if (output_inverter_used && !is_true_hp_lvds_driver && !is_true_hr_diff_driver)
             write_bit("OUT_DIFF");
 
         if (is_stepdown && !is_sing)
