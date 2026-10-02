@@ -2709,8 +2709,14 @@ struct FasmBackend
 
         write_bit("ZADREG[0]", !bool_or_default(ci->params, ctx->id("ADREG"), true));
         write_bit("ZALUMODEREG[0]", !bool_or_default(ci->params, ctx->id("ALUMODEREG")));
-        write_bit("ZAREG_2_ACASCREG_1", !bool_or_default(ci->params, ctx->id("ACASCREG")));
-        write_bit("ZBREG_2_BCASCREG_1", !bool_or_default(ci->params, ctx->id("BCASCREG")));
+        // prjxray's AREG_2_ACASCREG_1 is the conjunction AREG == 2 && ACASCREG == 1
+        // (fuzzers/100-dsp-mskpat/generate.py), not ACASCREG: its Z bit is set
+        // unless both hold.  Vivado agrees -- it clears the bit only for AREG=2
+        // with ACASCREG=1.  UG479's default for ACASCREG/BCASCREG is 1.
+        auto acascreg = int_or_default(ci->params, ctx->id("ACASCREG"), 1);
+        auto bcascreg = int_or_default(ci->params, ctx->id("BCASCREG"), 1);
+        write_bit("ZAREG_2_ACASCREG_1", !(areg == 2 && acascreg == 1));
+        write_bit("ZBREG_2_BCASCREG_1", !(breg == 2 && bcascreg == 1));
         write_bit("ZCARRYINREG[0]", !bool_or_default(ci->params, ctx->id("CARRYINREG")));
         write_bit("ZCARRYINSELREG[0]", !bool_or_default(ci->params, ctx->id("CARRYINSELREG")));
         write_bit("ZCREG[0]", !bool_or_default(ci->params, ctx->id("CREG"), true));
