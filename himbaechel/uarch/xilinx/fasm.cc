@@ -2103,6 +2103,9 @@ struct FasmBackend
         //     width-1 default kills the B-side read path on silicon.
         //   - RAMB18E1 READ_WIDTH_A=36: READ_WIDTH_B_18.
         //   - RAMB18E1 WRITE_WIDTH_B=36: WRITE_WIDTH_A_18.
+        //   - RAMB36E1 WRITE_WIDTH_B=72: WRITE_WIDTH_A_18 on BOTH halves (yosys
+        //     leaves WRITE_WIDTH_A at 0; the 72-bit write is the B port plus
+        //     the 32 low bits on the A port).
         // (Port of nextpnr-xilinx f1c77134.)
         const int read_width_a = int_or_default(ci->params, ctx->id("READ_WIDTH_A"), 0);
         const int write_width_b = int_or_default(ci->params, ctx->id("WRITE_WIDTH_B"), 0);
@@ -2111,7 +2114,9 @@ struct FasmBackend
         const bool this_param_is_read_width_b = (name == "READ_WIDTH_B");
         const bool this_param_is_write_width_a = (name == "WRITE_WIDTH_A");
         const bool b_side_reads_half_the_word = (is_36 ? (read_width_a == 72) : (read_width_a == 36));
-        const bool a_side_writes_half_the_word = (!is_36 && (write_width_b == 36));
+        const bool is_18_sdp_write = (!is_36 && (write_width_b == 36));
+        const bool is_36_sdp_write = (is_36 && (write_width_b == 72));
+        const bool a_side_writes_half_the_word = (is_18_sdp_write || is_36_sdp_write);
 
         const bool widen_unset_read_width_b =
                 this_width_param_is_unset && this_param_is_read_width_b && b_side_reads_half_the_word;
