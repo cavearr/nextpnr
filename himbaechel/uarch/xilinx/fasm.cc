@@ -2652,14 +2652,25 @@ struct FasmBackend
             filter_lookup = Xc7MMCM::filter_lookup_high;
         else
             filter_lookup = Xc7MMCM::filter_lookup_optimized;
-        write_int_vector("FILTREG1_RESERVED[11:0]", filter_lookup[clkfbout_mult - 1], 12);
-
-        // 0x9900 enables fractional counters
-        // only int counters would be 0x1 << 8
-        // 0xffff enables everything, I suppose, this is what is used in xap888
-        write_int_vector("POWER_REG_POWER_REG_POWER_REG[15:0]", 0xffff, 16);
+        // Same registers as write_pll: the loop filter value goes in TABLE and
+        // FILTREG1_RESERVED holds 0x8 (what Vivado programs for every MULT and
+        // BANDWIDTH).  POWER_REG is 0x9900 when a fractional counter is in use or an
+        // output is shifted by something other than half a VCO period (PHASE_MUX not
+        // a multiple of 4), 0x0100 otherwise.
+        write_int_vector("FILTREG1_RESERVED[11:0]", 0x8, 12);
+        bool needs_fractional_power = false;
+        for (const char *name : {"CLKFBOUT", "CLKOUT0", "CLKOUT1", "CLKOUT2", "CLKOUT3", "CLKOUT4", "CLKOUT5", "CLKOUT6"}) {
+            const bool is_used = std::string(name) == "CLKFBOUT" || ci->getPort(ctx->id(name)) != nullptr;
+            double divide;
+            const ClkoutCounter counter = calc_mmcm_clkout_counter(name, ci, divide);
+            const bool is_fractional_divide = divide != floor(divide);
+            const bool is_phase_off_half_cycle = counter.phasemux % 4 != 0;
+            if (is_used && (is_fractional_divide || is_phase_off_half_cycle))
+                needs_fractional_power = true;
+        }
+        write_int_vector("POWER_REG_POWER_REG_POWER_REG[15:0]", needs_fractional_power ? 0x9900 : 0x0100, 16);
         write_bit("LOCKREG3_RESERVED[0]");
-        write_int_vector("TABLE[9:0]", 0x3d4, 10);
+        write_int_vector("TABLE[9:0]", filter_lookup[clkfbout_mult - 1], 10);
         pop(2);
     }
     void write_dsp_cell(CellInfo *ci)
