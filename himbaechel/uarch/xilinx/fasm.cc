@@ -1489,11 +1489,14 @@ struct FasmBackend
                     // direction owns the slew choice.
                     if (!is_output)
                         write_bit("LVCMOS12_LVCMOS15_LVCMOS18.SLEW.SLOW");
+                } else if (is_tmds33) {
+                    // TMDS_33 has a receiver key of its own, defined on the P
+                    // half only; the N half carries no IN_DIFF (a reference
+                    // bitstream for an IBUFDS TMDS_33 sets exactly this one).
+                    if (is_master_half)
+                        write_bit("TMDS_33.IN_DIFF");
                 } else {
-                    if (iostandard == "TDMS_33")
-                        write_bit("TDMS_33.IN_DIFF");
-                    else
-                        write_bit("LVDS_25_SSTL135_SSTL15.IN_DIFF");
+                    write_bit("LVDS_25_SSTL135_SSTL15.IN_DIFF");
                 }
 
                 if (pad->attrs.count(id_IN_TERM))
