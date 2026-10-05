@@ -49,6 +49,12 @@ bool XilinxImpl::xc7_logic_tile_valid(IdString tile_type, const LogicTileStatus 
     bool small_memory = false;
     if (lts.cells[(3 << 4) | BEL_5LUT] != nullptr && get_tags(lts.cells[(3 << 4) | BEL_5LUT])->lut.is_memory)
         small_memory = true;
+    // A RAM32X1S alone in the D 6LUT leaves the 5LUT empty, but the D LUT is still
+    // 32-deep (fasm.cc writes SMALL): WA7/WA8 are unused, so the X inputs of C and B
+    // are free, e.g. for the data of the next RAM32X1S.
+    const bool d6_is_memory32 = tile_is_memory && get_tags(lts.cells[(3 << 4) | BEL_6LUT])->lut.is_memory32;
+    if (d6_is_memory32)
+        small_memory = true;
     NetInfo *wclk = nullptr;
 
     // SLICEM-only guard, run UNCONDITIONALLY (not behind the per-eight dirty

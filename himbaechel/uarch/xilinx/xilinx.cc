@@ -994,6 +994,8 @@ void XilinxImpl::assign_cell_tags()
             ct.lut.memory_group = 0; // fixme
             ct.lut.is_srl = ci->attrs.count(id_X_LUT_AS_SRL);
             ct.lut.is_memory = ci->attrs.count(id_X_LUT_AS_DRAM);
+            // a 32-deep LUT-RAM half (RAMD32); fasm.cc writes SMALL for the same type
+            ct.lut.is_memory32 = ct.lut.is_memory && str_or_default(ci->attrs, id_X_ORIG_TYPE) == "RAMD32";
             ct.lut.only_drives_carry = false;
             if (ci->cluster != ClusterId() && ct.lut.output_count > 0 && ct.lut.output_sigs[0] != nullptr &&
                 ct.lut.output_sigs[0]->users.entries() == 1 &&

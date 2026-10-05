@@ -36,7 +36,7 @@ struct XilinxCellTags
     {
         struct
         {
-            bool is_memory, is_srl;
+            bool is_memory, is_srl, is_memory32;
             int input_count, output_count;
             int memory_group;
             bool only_drives_carry;
