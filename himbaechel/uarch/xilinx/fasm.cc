@@ -453,6 +453,14 @@ struct FasmBackend
                     if (site_has_tristate_register)
                         continue;
                 }
+                const bool is_zinv_t1 = boost::ends_with(c, ".ZINV_T1");
+                if (is_zinv_t1) {
+                    auto dot = c.find('.');
+                    const bool site_has_t1_tied_low =
+                            dot != std::string::npos && ologic_t1_low.count(tile_name + "/" + c.substr(0, dot));
+                    if (site_has_t1_tied_low)
+                        continue;
+                }
                 // Phantom-BUFGCTRL guard (per-slot variant): suppress
                 // BUFGCTRL.BUFGCTRL_X0Y<n>.* features on (tile, slot) pairs
                 // that have no actually-bound BUFGCTRL cell.
@@ -1650,6 +1658,9 @@ struct FasmBackend
     // reason for putting a register at the pad at all.  Vivado sets OQUSED and
     // the DDR rate and leaves OMUX alone.
     std::set<std::string> ologic_registered;
+    // OLOGIC sites whose OSERDESE2 has T1 tied to GND: the pad-tristate pseudo-pip must not set
+    // ZINV_T1 there (the GND arrives as VCC_WIRE and needs the site inverter active).
+    std::set<std::string> ologic_t1_low;
 
     // OLOGIC sites whose tristate flip-flop (TFF) holds an ODDR that drives the
     // pad's T input, as "TILE/OLOGIC_Yn".  The pseudo-pip that crosses the site
@@ -1676,6 +1687,19 @@ struct FasmBackend
             ologic_registered.insert(tile + "/" + site_y);
         if (ci->type.in(id_OLOGICE2_TFF, id_OLOGICE3_TFF))
             ologic_t_registered.insert(tile + "/" + site_y);
+        const bool is_oserdese2 = ci->type == id_OSERDESE2_OSERDESE2;
+        if (is_oserdese2) {
+            // pack_constants turns a GND tie on an invertible pin into the VCC net plus
+            // IS_T1_INVERTED, so "tied low" is either form.
+            NetInfo *t1 = ci->getPort(ctx->id("T1"));
+            const bool inverted = bool_or_default(ci->params, ctx->id("IS_T1_INVERTED"), false);
+            const bool tied_to_gnd = t1 != nullptr && t1->name == ctx->id("$PACKER_GND_NET");
+            const bool tied_to_inverted_vcc =
+                    t1 != nullptr && t1->name == ctx->id("$PACKER_VCC_NET") && inverted;
+            const bool t1_tied_low = tied_to_gnd || tied_to_inverted_vcc;
+            if (t1_tied_low)
+                ologic_t1_low.insert(tile + "/" + site_y);
+        }
 
         if (ci->type == id_ILOGICE3_IFF) {
             write_bit("IDDR.IN_USE");
@@ -1831,9 +1855,15 @@ struct FasmBackend
             // For cascaded OSERDESE2, OQUSED must be set even though OQ is not connected
             write_bit("OQUSED", is_cascaded || ci->getPort(id_OQ));
             write_bit("ZINV_CLK", !bool_or_default(ci->params, id_IS_CLK_INVERTED, false));
-            for (std::string t : {"T1", "T2", "T3", "T4"})
-                write_bit("ZINV_" + t, (ci->getPort(ctx->id(t)) != nullptr || t == "T1") &&
+            // A Tn tied to GND reaches the site through the interconnect VCC_WIRE (the only constant
+            // an IMUX can select), so the site inverter must stay active: ZINV_Tn clear. Setting it
+            // turned "always drive" (T1 = 0) into a permanently tri-stated pin.
+            for (std::string t : {"T1", "T2", "T3", "T4"}) {
+                NetInfo *tn = ci->getPort(ctx->id(t));
+                bool tied_low = tn != nullptr && tn->name == ctx->id("$PACKER_GND_NET");
+                write_bit("ZINV_" + t, (tn != nullptr || t == "T1") && !tied_low &&
                                                !bool_or_default(ci->params, ctx->id("IS_" + t + "_INVERTED"), false));
+            }
             for (std::string d : {"D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8"})
                 write_bit("IS_" + d + "_INVERTED",
                           bool_or_default(ci->params, ctx->id("IS_" + d + "_INVERTED"), false));
