@@ -1136,6 +1136,24 @@ struct FasmBackend
             }
             return false;
         };
+        // Whether a cell of the OLOGIC beside this pad -- an ODDR on its data or
+        // on its tristate, or an OSERDESE2 -- drives the pad's output buffer.
+        auto pad_driven_by_ologic_cell = [&]() {
+            CellInfo *obuf = pad_net->driver.cell;
+            for (auto &port : obuf->ports) {
+                NetInfo *net = port.second.net;
+                const bool is_driven_input =
+                        port.second.type == PORT_IN && net != nullptr && net->driver.cell != nullptr;
+                if (!is_driven_input)
+                    continue;
+                const bool driver_is_ologic_cell =
+                        net->driver.cell->type.in(id_OLOGICE2_OUTFF, id_OLOGICE3_OUTFF, id_OLOGICE2_TFF,
+                                                  id_OLOGICE3_TFF, id_OSERDESE2_OSERDESE2);
+                if (driver_is_ologic_cell)
+                    return true;
+            }
+            return false;
+        };
         bool is_output = false, is_input = false;
         if (pad_net->driver.cell != nullptr)
             is_output = true;
@@ -1328,8 +1346,17 @@ struct FasmBackend
             // driven LIOB18 output half.  SING tiles are included: their own
             // segbits_liob18_sing.db defines IOB_Y{0,1}.OBUF_HP_BANK_GLUE, so
             // the earlier !is_sing skip dropped a real, expressible bit.
+            //
+            // Its three bits are not the IOB's, though: they are OQUSED, OMUX.D1
+            // and OSERDES.DATA_RATE_TQ.BUF of the OLOGIC beside it, which is how
+            // an OLOGIC is set when it only passes the fabric signal through.
+            // When an OLOGIC cell drives the pad, that cell configures the site,
+            // and the glue would add OMUX.D1, driving the pad from D1 around the
+            // register, and DATA_RATE_TQ.BUF, which contradicts the
+            // DATA_RATE_TQ.DDR of an ODDR on T.  Vivado writes neither there.
             bool is_left_hp_single_ended = is_liob18 && !is_diff;
-            if (is_left_hp_single_ended)
+            const bool ologic_passes_through = is_left_hp_single_ended && !pad_driven_by_ologic_cell();
+            if (ologic_passes_through)
                 write_bit("OBUF_HP_BANK_GLUE");
         }
 
