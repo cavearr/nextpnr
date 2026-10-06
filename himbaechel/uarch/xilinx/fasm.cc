@@ -2105,7 +2105,7 @@ struct FasmBackend
         //   - RAMB18E1 WRITE_WIDTH_B=36: WRITE_WIDTH_A_18.
         //   - RAMB36E1 WRITE_WIDTH_B=72: WRITE_WIDTH_A_18 on BOTH halves (yosys
         //     leaves WRITE_WIDTH_A at 0; the 72-bit write is the B port plus
-        //     the 32 low bits on the A port).
+        //     the 36 low bits on the A port).
         // (Port of nextpnr-xilinx f1c77134.)
         const int read_width_a = int_or_default(ci->params, ctx->id("READ_WIDTH_A"), 0);
         const int write_width_b = int_or_default(ci->params, ctx->id("WRITE_WIDTH_B"), 0);
