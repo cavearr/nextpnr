@@ -2321,6 +2321,19 @@ struct FasmBackend
             return prop.as_int64();
     }
 
+    // A PLL/MMCM output phase in degrees.  Vivado takes -360..360 (both ends included); outside
+    // that range it drops the value with a critical warning (Netlist 29-72) and programs a phase
+    // of 0, so the clock is not the one the design asks for.  Stop instead.
+    double clkout_phase(CellInfo *ci, const std::string &name)
+    {
+        const double phase = float_or_default(ci, name + "_PHASE", 0);
+        const bool phase_in_range = phase >= -360 && phase <= 360;
+        if (!phase_in_range)
+            log_error("%s: %s_PHASE must be in the range -360..360 (got %.10g)\n", ctx->nameOf(ci), name.c_str(),
+                      phase);
+        return phase;
+    }
+
     // Counter settings of one divider, as Vivado 2026.1 programs them (measured against it for
     // DIVIDE 2..128 x DUTY_CYCLE 0.05..0.95 x PHASE -360..360 in the PLL and the MMCM).  HIGH and LOW
     // follow the duty cycle at half-cycle resolution (EDGE is the half cycle), clamped so each phase
@@ -2365,7 +2378,7 @@ struct FasmBackend
         // phase_eights = floor((1/360) * MULT * 8), which for MULT=48 is 1 --
         // so we emitted CLKFBOUT_CLKOUT1_PHASE_MUX = 001 and shifted the
         // FEEDBACK clock by an eighth of a VCO period.  Vivado emits 0.
-        double phase = float_or_default(ci, name + "_PHASE", 0);
+        double phase = clkout_phase(ci, name);
         double duty = float_or_default(ci, name + "_DUTY_CYCLE", 0.5);
         const ClkoutCounter counter = calc_clkout_counter(divide, duty, phase, false);
         const int high = counter.high, low = counter.low, phasemux = counter.phasemux, delaytime = counter.delaytime;
@@ -2511,7 +2524,7 @@ struct FasmBackend
         // the PLL writer above was corrected, this is the matching MMCM fix
         // (nextpnr-xilinx#191).  An unset CLKOUT*_PHASE otherwise shifts the
         // clock by an eighth of a VCO period.
-        const double phase = float_or_default(ci, name + "_PHASE", 0);
+        const double phase = clkout_phase(ci, name);
         const double duty = float_or_default(ci, name + "_DUTY_CYCLE", 0.5);
         return calc_clkout_counter(divide, duty, phase, true);
     }
