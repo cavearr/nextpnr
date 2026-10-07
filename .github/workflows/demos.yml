@@ -37,6 +37,16 @@
 # are the more correct ones.  One revision for every family is worth
 # more than a bit-for-bit-frozen old one.
 #
+# 54fea88c moves on from ed3331c6 for the HP-bank glue: fasm2frames no
+# longer injects OBUF_HP_BANK_GLUE on a half whose OLOGIC holds a cell
+# (openXC7/prjxray#30), which is what lets the two VC707 LiteX stretch SoCs
+# assemble once #72 registers their SD card tristates.  The revisions in
+# between (#27 and #28: xc7frames2bit refuses frame addresses the part does
+# not have and exits 1 when it cannot write the bitstream; #29: fuzzers
+# only) give the same .bit as ed3331c6 for the 12 virtex7 and 2 kintex7
+# entries of this gate.  litex-ddr-qmtech-kintex7 loses OMUX.D1 on its 44
+# OSERDES halves (2 frames), a bit Vivado does not set there either.
+#
 # WHAT IS CHECKED
 #
 # Per-register equivalence, with lvs_equiv: the bitstream is read back into a
@@ -135,7 +145,7 @@ env:
   # database or tool revision would change what is measured.
   PRJXRAY_DB_REV: 517d66a383676cb971177ea92b0ff3b6ea6e8690
   # virtex7-capable fasm2frames, used for every family; see header
-  PRJXRAY_REV: ed3331c6200f421164101388759fc2860b0f5634
+  PRJXRAY_REV: 54fea88cc61b58b76a83d0be7b1194a5ec1d7d2d
   # demo-projects commit carrying the five pre-synthesized .json netlists
   # (yosys 0.67 synthesis outputs; the gate reuses them, no yosys needed
   # for those entries)
