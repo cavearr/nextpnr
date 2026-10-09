@@ -424,6 +424,20 @@ if (cell.second->type.in(id_BUFR, id_BUFR_BUFR)) {
             }
             if (!has_bound_bufgctrl)
                 return true;
+            // Never route THROUGH a BUFGCTRL (its I0/I1 -> O pseudo pip). A bound BUFGCTRL's nets end at
+            // I0/I1 and start at O, so they never need it; an unbound slot in a tile that has a bound
+            // BUFGCTRL passes the tile check above, but the FASM writer's per-slot phantom-BUFGCTRL guard
+            // drops that slot's IN_USE/ZINV_CE0/ZINV_S0, so the route-through comes out as a buffer that
+            // passes nothing: the net is a constant on hardware (seen as stuck register bits behind a
+            // data net that took the global clock spine).
+            IdString dst = IdString(tile_data.wires[pip_data.dst_wire].name);
+            IdString src = IdString(tile_data.wires[pip_data.src_wire].name);
+            const std::string &ds = dst.str(ctx), &ss = src.str(ctx);
+            bool through_bufgctrl = boost::starts_with(ds, "CLK_BUFG_BUFGCTRL") && boost::ends_with(ds, "_O") &&
+                                    boost::starts_with(ss, "CLK_BUFG_BUFGCTRL") &&
+                                    (boost::ends_with(ss, "_I0") || boost::ends_with(ss, "_I1"));
+            if (through_bufgctrl)
+                return true;
         }
     }
 
