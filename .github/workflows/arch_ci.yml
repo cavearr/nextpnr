@@ -4,6 +4,11 @@ name: Arch CI tests
 
 on: [push, pull_request]
 
+# A series of pushes to one ref leaves only the run of the last one.
+concurrency:
+  group: arch-ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   Build-nextpnr:
     strategy:
@@ -11,6 +16,7 @@ jobs:
       matrix:
         arch: [mistral, ice40, ecp5, generic, nexus, machxo2, himbaechel, rust]
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     env:
       DEPS_PATH: ${{ github.workspace }}/deps
       YOSYS_REVISION: 7045cf509e1d95cbc973746674cf2d7c73c02e50
@@ -28,9 +34,10 @@ jobs:
       with:
         python-version: '3.12'
     - name: Install
+      timeout-minutes: 45
       run: |
-        sudo apt-get update
-        sudo apt-get install git make cmake libboost-all-dev python3-dev pypy3 libeigen3-dev tcl-dev lzma-dev libftdi-dev clang bison flex swig qt6-base-dev iverilog libreadline-dev liblzma-dev cargo rustc
+        sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+        sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install git make cmake libboost-all-dev python3-dev pypy3 libeigen3-dev tcl-dev lzma-dev libftdi-dev clang bison flex swig qt6-base-dev iverilog libreadline-dev liblzma-dev cargo rustc
 
     - name: Cache yosys installation
       uses: actions/cache@v4
