@@ -4,9 +4,11 @@ name: Arch CI tests
 
 on: [push, pull_request]
 
-# A series of pushes to one ref leaves only the run of the last one.
+# One run per branch: a series of pushes, or a push and the pull_request
+# of the same branch, leaves only the last. Keyed on repository + branch so
+# that a fork's branch never shares a group with a branch here.
 concurrency:
-  group: arch-ci-${{ github.ref }}
+  group: arch-ci-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
