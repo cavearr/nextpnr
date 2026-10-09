@@ -1107,31 +1107,6 @@ struct FasmBackend
             }
             return true;
         };
-        // Whether the tile's *other* half is also a single-ended input.  The
-        // database gives IOB_Y0 and IOB_Y1 the same bit for their low-voltage
-        // LVCMOS .IN feature, with opposite polarity, so describing both halves
-        // makes the second clear what the first set and fasm2frames rejects the
-        // pair.  Vivado emits no .IN for such a tile at all.
-        auto partner_pad_is_output = [&]() {
-            Loc bl = ctx->getBelLocation(pad->bel);
-            for (auto other : ctx->getBelsByTile(bl.x, bl.y)) {
-                if (other == pad->bel)
-                    continue;
-                CellInfo *oc = ctx->getBoundBelCell(other);
-                if (oc == nullptr || oc->type != id_PAD)
-                    continue;
-                NetInfo *on = oc->getPort(id_PAD);
-                if (on == nullptr)
-                    continue;
-                for (auto &u : on->users)
-                    if (boost::contains(u.cell->type.str(ctx), "OUTBUF"))
-                        return true;
-                if (on->driver.cell != nullptr && boost::contains(on->driver.cell->type.str(ctx), "OUTBUF"))
-                    return true;
-            }
-            return false;
-        };
-
         auto partner_pad_is_input = [&]() {
             Loc bl = ctx->getBelLocation(pad->bel);
             for (auto other : ctx->getBelsByTile(bl.x, bl.y)) {
