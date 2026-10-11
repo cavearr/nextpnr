@@ -1165,6 +1165,28 @@ struct FasmBackend
             }
             return false;
         };
+        // The other half drives its pad net. partner_pad_is_input stays true
+        // for a bidirectional pad, so the two have to be read apart.
+        auto partner_pad_drives = [&]() {
+            Loc bl = ctx->getBelLocation(pad->bel);
+            for (auto other : ctx->getBelsByTile(bl.x, bl.y)) {
+                const bool same_bel = other == pad->bel;
+                if (same_bel)
+                    continue;
+                CellInfo *oc = ctx->getBoundBelCell(other);
+                const bool partner_holds_pad = oc != nullptr && oc->type == id_PAD;
+                if (!partner_holds_pad)
+                    continue;
+                NetInfo *on = oc->getPort(id_PAD);
+                const bool partner_net_missing = on == nullptr;
+                if (partner_net_missing)
+                    continue;
+                const bool partner_has_a_driver = on->driver.cell != nullptr;
+                if (partner_has_a_driver)
+                    return true;
+            }
+            return false;
+        };
         bool is_output = false, is_input = false;
         if (pad_net->driver.cell != nullptr)
             is_output = true;
@@ -1447,17 +1469,29 @@ struct FasmBackend
             // LVCMOS..._LVTTL_SSTL135_SSTL15.SLEW.SLOW alias.  The set below
             // is what a reference bitstream sets for an LVCMOS18 input on
             // bank 38, including the partner half's slew and pulldown.
-            bool is_right_hp_single_ended_input_master = is_riob18 && !is_output && !is_diff && is_master_half;
+            const bool is_right_hp_single_ended_input_master = is_riob18 && !is_output && !is_diff && is_master_half;
             if (is_right_hp_single_ended_input_master) {
-                write_bit("LVCMOS12_LVCMOS15_LVCMOS18.SLEW.SLOW");
-                write_bit("LVCMOS12_LVCMOS15.IN");
-                write_bit("LVCMOS12_LVCMOS15_SSTL12_SSTL135_SSTL15.IN_ONLY");
+                // Two pure inputs. The set below describes an empty partner:
+                // the short .IN, which zynq7's segbits_riob18.db does not
+                // name, and PULLTYPE.PULLDOWN on that partner. The partner's
+                // own pad then writes PULLTYPE.NONE as well, and fasm2frames
+                // rejects the tile. Vivado sets the long .IN on each half
+                // and one PULLTYPE (xc7z045ffg900-1, RIOB18_X107Y201). The
+                // long .IN is written further down, so skip this set.
+                const bool partner_receives = partner_pad_is_input();
+                const bool partner_drives = partner_pad_drives();
+                const bool partner_is_pure_input = partner_receives && !partner_drives;
+                if (!partner_is_pure_input) {
+                    write_bit("LVCMOS12_LVCMOS15_LVCMOS18.SLEW.SLOW");
+                    write_bit("LVCMOS12_LVCMOS15.IN");
+                    write_bit("LVCMOS12_LVCMOS15_SSTL12_SSTL135_SSTL15.IN_ONLY");
 
-                std::string saved = fasm_ctx.back();
-                fasm_ctx.back() = "IOB_Y1";
-                write_bit("LVCMOS12_LVCMOS15_LVCMOS18.SLEW.SLOW");
-                write_bit("PULLTYPE.PULLDOWN");
-                fasm_ctx.back() = saved;
+                    std::string saved = fasm_ctx.back();
+                    fasm_ctx.back() = "IOB_Y1";
+                    write_bit("LVCMOS12_LVCMOS15_LVCMOS18.SLEW.SLOW");
+                    write_bit("PULLTYPE.PULLDOWN");
+                    fasm_ctx.back() = saved;
+                }
             }
             if (!is_diff) {
                 if (iostandard == "LVCMOS33" || iostandard == "LVTTL" || iostandard == "LVCMOS25") {
