@@ -1336,6 +1336,19 @@ void XC7Packer::constrain_bram_cascades()
         }
         ++chains;
     }
+    // A closed cycle has no block that is not itself a sink, so the walk
+    // above never starts and nothing is clustered. The router then fails,
+    // with the two blocks a full tile apart. Say so here.
+    for (CellInfo *ci : rams) {
+        const bool drives_a_cascade = cascade_sink(ci) != nullptr;
+        const bool is_a_cascade_sink = cascaded_into.count(ci->name) != 0;
+        const bool touches_a_cascade = drives_a_cascade || is_a_cascade_sink;
+        const bool placed_in_a_chain = ci->cluster != ClusterId();
+        const bool closed_cycle = touches_a_cascade && !placed_in_a_chain;
+        if (closed_cycle)
+            log_error("the RAMB36E1 cascade through %s is a cycle, so it has no first block to place\n",
+                      ctx->nameOf(ci));
+    }
     const bool found_any_chain = chains > 0;
     if (found_any_chain)
         log_info("Found %d RAMB36E1 cascade chain(s)\n", chains);
