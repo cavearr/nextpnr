@@ -1554,10 +1554,16 @@ struct FasmBackend
                         // VC707's BPI flash data pads (a Vivado bitstream,
                         // LIOB18_X81Y83) set it, and without it those pads read
                         // as constants -- the flash then looked silent.
+                        // The glue is a left-bank key only: RIOB18 has no
+                        // IOB_Y0.IBUF_HP_BANK_GLUE and fasm2frames stops at
+                        // it, while Vivado sets just the two .IN there
+                        // (xc7z030/z100/k160t, the two halves as IOBUF and
+                        // input, site bits identical without the glue).
                         if (yLoc == 1)
                             write_bit("LVCMOS12_LVCMOS15_LVCMOS18.IN");
                         else {
-                            write_bit("IBUF_HP_BANK_GLUE");
+                            if (is_liob18)
+                                write_bit("IBUF_HP_BANK_GLUE");
                             write_bit("LVCMOS12_LVCMOS15_LVCMOS18.IN");
                         }
                     }
