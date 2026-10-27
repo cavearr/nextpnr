@@ -37,7 +37,7 @@ env:
   # The database the chipdbs are generated from, and the demo-projects commit
   # carrying the cases.  Fixed revisions, because the chipdb decides what the
   # cases do.
-  PRJXRAY_DB_REV: a8fd3f462b6af16775babe5f938d257fc7e2a097
+  PRJXRAY_DB_REV: a8b09269beb6e3d3c07e2a0901f845420df1c802
   DEMO_PROJECTS_REV: 0b1ed03a5757abf7086efd474adeff0b5cfc2ad8
 
 jobs:
