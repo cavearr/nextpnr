@@ -653,6 +653,9 @@ def main():
         lut.add_setup_hold("CLK", f"WA{i}", ClockEdge.RISING, TimingValue(100, 500), TimingValue(100, 200))
     lut.add_setup_hold("CLK", "WE", ClockEdge.RISING, TimingValue(100, 600), TimingValue(100, 100))
     lut.add_setup_hold("CLK", "DI1", ClockEdge.RISING, TimingValue(100, 100), TimingValue(100, 100))
+    # DI2 is the data input of the O6 half of a 32-deep LUT-RAM (RAMD32 at
+    # O6) and of an SRL16E: without a setup check those writes go untimed.
+    lut.add_setup_hold("CLK", "DI2", ClockEdge.RISING, TimingValue(100, 100), TimingValue(100, 100))
     ff = ch.timing.add_cell_variant("DEFAULT", "SLICE_FFX")
     ff.add_setup_hold("CK", "CE", ClockEdge.RISING, TimingValue(100, 100), TimingValue(0, 0))
     ff.add_setup_hold("CK", "SR", ClockEdge.RISING, TimingValue(100, 100), TimingValue(0, 0))
