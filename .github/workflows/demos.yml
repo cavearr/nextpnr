@@ -92,6 +92,9 @@ name: demos
 on:
   pull_request:
   workflow_dispatch:
+  push:
+    branches:
+      - ci/apt-cache-test
 
 concurrency:
   group: demos-${{ github.ref }}
@@ -164,13 +167,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # ---------------------------------------------------------------
-          # essential / small items.  Each one is here because it is the
-          # only thing in the gate that reaches some specific path; the
-          # comment says which.  Keep them small -- the point is that a
-          # broken path is identified in minutes, by name.
-          # ---------------------------------------------------------------
-
+          # Test branch: two entries.  vc707-johnson installs yosys
+          # from apt (source example, lvs).  blinky is a demo-project.
+          # No stretch entry.
           # IBUFDS receiver + one BUFG that lands in a CLK_BUFG_TOP_R tile.
           # The reference case: xc7-bitstream-tools builds the same design
           # from its own checkout and gets a byte-identical FASM, and it is
@@ -185,125 +184,15 @@ jobs:
             part: xc7vx485tffg1761-2
             die: xc7vx485t
             timeout: 90
-
-          # HP-bank differential driver (OBUFDS) and bidirectional pad
-          # (IOBUFDS, DIFF_SSTL15).  The bidirectional shape is the one
-          # that made fasm2frames reject litex-ddr-qmtech-kintex7 before
-          # the receiver slew line was guarded on !is_output.
-          - name: vc707-hp-diffio
-            tier: essential
-            synth: -nobram
-            lvs: true
-            source: example
-            design: vc707-hp-diffio
-            family: virtex7
-            part: xc7vx485tffg1761-2
-            die: xc7vx485t
-            timeout: 90
-
-          # ILOGIC delayed input: the RIOI pseudo-pip emitting
-          # ILOGIC_Y<i>.IDELMUXE3.P0.  No FASM from any demo project
-          # contains an IDELMUXE3 line, so without this the XC7V branch of
-          # that mapping is asserted from the database alone.
-          - name: vc707-idelay
-            tier: essential
-            synth: -nobram
-            lvs: true
-            source: example
-            design: vc707-idelay
-            family: virtex7
-            part: xc7vx485tffg1761-2
-            die: xc7vx485t
-            timeout: 90
-
-          # Several bound BUFGCTRLs across the CLK_BUFG column.  This is
-          # the entry that distinguishes a phantom-BUFGCTRL guard which
-          # admits the real sites from one that suppresses them: the two
-          # halves of the column are numbered differently (BOT holds
-          # BUFGCTRL_X0Y0..15, TOP holds X0Y16..31).
-          - name: vc707-multibufg
-            tier: essential
-            synth: -nobram
-            lvs: true
-            source: example
-            design: vc707-multibufg
-            family: virtex7
-            part: xc7vx485tffg1761-2
-            die: xc7vx485t
-            timeout: 90
-
-          # ROUTES NOW.  This was a recorded P&R failure: the design could not
-          # be routed, on the hypothesis that three signals contend for two
-          # slice exits once a carry packs with a 5FF.  With the placer
-          # settings the hardware flow uses it places and routes and makes
-          # 207.21 MHz against 200.  Whatever the packer was doing wrong, it
-          # was reachable only from the placement the old settings produced,
-          # so the design is gated normally again and its recorded failure is
-          # deleted.
-          #
-          # A carry position whose sum AND whose carry-out both feed fabric.
-          # The subslice has two exits -- the hardwired direct pin and the
-          # configurable xMUX -- so this is legal, and a packer that charges
-          # both to the mux rejects it.  No demo project reaches the shape:
-          # their carry chains consume each carry-out internally.
-          - name: vc707-carry
-            tier: essential
-            synth: -nobram
-            source: example
-            design: vc707-carry
-            family: virtex7
-            part: xc7vx485tffg1761-2
-            die: xc7vx485t
-            timeout: 90
-
-          # Block RAM with per-byte write enables, spanning two RAMB36E1s so
-          # the byte lanes are split across primitives.  This is the write
-          # path every LiteX design depends on, and the one where a memory
-          # lowering that ORs the write-enables together still builds.
-          - name: vc707-bram
-            tier: essential
-            lvs: true
-            source: example
-            design: vc707-bram
-            family: virtex7
-            part: xc7vx485tffg1761-2
-            die: xc7vx485t
-            timeout: 90
-
-          # MMCM with one output that leaves CLKOUT*_PHASE unset, so the
-          # writer's default is actually consulted.  Every MMCM in every
-          # demo project sets all its phases explicitly, which is why a
-          # default of 1 degree instead of UG472's 0 went unnoticed.
-          - name: vc707-mmcm
-            tier: essential
-            synth: -nobram
-            lvs: true
-            source: example
-            design: vc707-mmcm
-            family: virtex7
-            part: xc7vx485tffg1761-2
-            die: xc7vx485t
-            timeout: 90
-
-          # DSP48E1 multiply-accumulate: the DSP config writer has no other
-          # coverage here (no blinky has a multiplier and the LiteX SoCs in
-          # this gate are built without one).
-          - name: vc707-dsp
-            tier: essential
-            synth: -nobram
-            lvs: true
-            lvs_blocked: "the LVS compares ADREG and DREG, which Vivado and nextpnr both write off when USE_DPORT is FALSE, jrrk2/fasm2netlist#6"
-            lvs_blocked_differ: 2
-            source: example
-            design: vc707-dsp
-            family: virtex7
-            part: xc7vx485tffg1761-2
-            die: xc7vx485t
-            timeout: 90
-
-          # ---------------------------------------------------------------
-          # essential / demo projects (pre-synthesized netlists)
-          # ---------------------------------------------------------------
+            # Present so the steps that read them still type-check.  Empty,
+            # so the netlist and block-RAM gates stay skipped.
+            netlist: ""
+            xdc: ""
+            pnr_flags: ""
+            fom_max_worst: ""
+            fom_max_p95: ""
+            lvs_blocked: ""
+            lvs_blocked_differ: ""
 
           # Smallest artix7 end-to-end path.
           - name: blinky-digilent-arty
@@ -318,296 +207,13 @@ jobs:
             die: xc7a50t
             seed: 1
             timeout: 60
-
-          # Smallest kintex7 end-to-end path.
-          - name: blinky-qmtech
-            tier: essential
-            lvs: true
-            source: demo-project
-            project: blinky-qmtech
-            top: blinky
-            family: kintex7
-            upper: KINTEX7
-            part: xc7k325tffg676-1
-            die: xc7k325t
-            seed: 1
-            timeout: 60
-
-          # spartan7: the only family whose device model was, until
-          # recently, wrong enough to freeze real hardware (openXC7 #177).
-          # Two entries because the DDR one reaches the memory controller
-          # and the minimal one is the fast smoke test.
-          # RECORDED P&R FAILURE: the same SING tile as litex-ddr-arty-s7
-          # below, reached by whichever clock pin the router gives up on
-          # first -- which depends on placement, so both entries record the
-          # tile and site and stop before the pin name.  Recording
-          # CLKDIVINV_OUT for one and CLKINV_OUT for the other looked like
-          # two distinct defects; changing the placer settings swapped them
-          # over, which is how it became clear they are one.  Both boards' constraint
-          # file pins ddram_reset_n to J6, whose OLOGIC is in
-          # RIOI3_SING_X43Y49; here it is the OLOGIC clock rather than the
-          # divider, and segbits+ppips for RIOI3_SING carry 2 OLOGIC*CLK*
-          # features against 32 for plain RIOI3.  One under-fuzzed tile type
-          # accounts for both designs.
-          - name: litex-minimal-arty-s7
-            tier: essential
-            lvs: true
-            lvs_blocked: "the extraction does not name the PLLE2 output a BUFG is traced to, jrrk2/fasm2netlist#6"
-            lvs_blocked_differ: 4
-            source: demo-project
-            project: litex-minimal-arty-s7
-            top: digilent_arty_s7
-            family: spartan7
-            upper: SPARTAN7
-            part: xc7s50csga324-1
-            die: xc7s50
-            seed: 1
-            timeout: 120
-
-          # RECORDED P&R FAILURE: an OSERDESE2 that cannot be configured.
-          #
-          # LiteX drives every DDR output through an OSERDESE2 with CLKDIV
-          # connected (45 of them here), and ddram_reset_n is pinned to J6 --
-          # IOB_X1Y49, whose OLOGIC sits in RIOI3_SING_X43Y49.  prjxray's
-          # spartan7 SING databases define NO OLOGIC CLKDIV feature at all:
-          # segbits+ppips for RIOI3_SING carry 71 features against 531 for
-          # plain RIOI3, which has all 24 OLOGIC*CLKDIV routes including the
-          # IOI_OLOGIC0_CLKDIV <- IOI_IMUX8_* one wanted here.  So the clock
-          # cannot reach that divider in a SING tile, and a LOC pins the cell
-          # there -- the placer has no say.
-          #
-          # This is not new breakage.  The chipdb generator now flags every
-          # tile-routing pip absent from both bit databases (PIP_CFG_NO_BITS)
-          # and XilinxImpl::is_pip_unavail refuses it, so the router says so
-          # out loud.  Before that the pip was routed, the feature was written,
-          # fasm2frames dropped it under XRAY_ALLOW_MISSING_FEATURES, and the
-          # board got a bitstream whose DDR PHY divider clock was simply
-          # absent.  The golden frames hash recorded for this design came from
-          # such a build, which is why a recorded hash was never evidence.
-          #
-          # Closing it means fuzzing the SING OLOGIC clock bits in prjxray,
-          # not a change here.  Same under-fuzzed SING tiles as the five
-          # LIOB18_SING features still missing in the VC707 IOB delta.
-          - name: litex-ddr-arty-s7
-            tier: essential
-            lvs: true
-            lvs_blocked: "the extraction does not name the PLLE2 output a BUFG is traced to, jrrk2/fasm2netlist#6"
-            lvs_blocked_differ: 4
-            source: demo-project
-            project: litex-ddr-arty-s7
-            top: digilent_arty_s7
-            family: spartan7
-            upper: SPARTAN7
-            part: xc7s50csga324-1
-            die: xc7s50
-            seed: 1
-            timeout: 180
-
-          # Largest essential entry: LiteX + DDR3 on kintex7.  This is the
-          # one whose frames moved with the prjxray pin (see header).
-          - name: litex-ddr-qmtech-kintex7
-            tier: essential
-            lvs: true
-            lvs_blocked: "the extraction does not name the PLLE2 output a BUFG is traced to (4), reads an SDP RAMB18's write enables from site pin i rather than 2i (9) and compares the x bit of a RAM32M's write data (1), jrrk2/fasm2netlist#6"
-            lvs_blocked_differ: 14
-            source: demo-project
-            project: litex-ddr-qmtech-kintex7
-            top: qmtech_xc7k325t
-            family: kintex7
-            upper: KINTEX7
-            part: xc7k325tffg676-1
-            die: xc7k325t
-            seed: 2
-            timeout: 180
-
-          # ---------------------------------------------------------------
-          # stretch / LiteX Linux.  Non-blocking, not proved.  These are
-          # the designs that boot a kernel, and they are two orders of
-          # magnitude larger than anything above: they fail in ways small
-          # designs cannot (router congestion floors, placer timeouts,
-          # int32 overflow in the HeAP cell budget).  Success criterion is
-          # only that P&R completes and the FASM assembles.
-          # ---------------------------------------------------------------
-
-          # The stretch netlist comes from a build that was flashed to a
-          # VC707 and watched boot, not from a configuration that merely
-          # elaborates.  That matters more here than anywhere else in the
-          # gate: a LiteX SoC with a zeroed ROM, a dead clock or a
-          # miscalibrated DDR3 PHY places, routes, assembles and configures
-          # with DONE asserted, and is distinguishable from a working one
-          # only on a board.
-          #
-          # It ships as a netlist rather than as sources because this is the
-          # nextpnr repository: generating the SoC here would put a LiteX
-          # version, a yosys version and a RISC-V toolchain between a code
-          # change and a result.  The netlist carries the BIOS too -- yosys
-          # resolves the ROM's $readmemh into RAMB INIT words at synthesis
-          # time -- so it needs no compiler.  29.2 MB raw, 1.9 MB gzipped in
-          # the tree.
-          # A processor whose instruction set is OCaml 4.14 bytecode, with the
-          # same Ethernet stack the LiteX SoCs use.  It is here for the paths
-          # the others do not reach: block RAM read at width 1 and 9 (the x1/x9
-          # encoding that was wrong in the RAMB36 width bits), two inputs
-          # sharing one HP I/O tile (the enable bits that left CPU_RESET deaf),
-          # and a packet DMA whose block-RAM writes are what the hold-fix
-          # detours exist for.  xc7-bitstream-tools builds the same design from
-          # source and proves its extraction; this asks what nextpnr does with
-          # the netlist.  50 MHz is what it closes here with the FPU in it --
-          # see its README for the sweep.
-          - name: vc707-ocaml
-            tier: stretch
-            source: netlist
-            design: vc707-ocaml
-            netlist: vc707_ethmin_vm.json.gz
-            xdc: vc707_ethmin_vm.xdc
-            family: virtex7
-            part: xc7vx485tffg1761-2
-            die: xc7vx485t
-            timeout: 300
-
-          # A CDC 6000 processor (60-bit, dual issue) running the 1972 Zurich
-          # Pascal compiler, which compiles itself on the board -- this netlist,
-          # through this flow, did so over NFS and from its block-RAM disk, with
-          # output byte-identical to the host's.  Here for the block RAM: 376
-          # RAMB36 with contents (a 60-bit core memory and a 1 MB disk), the
-          # most in the gate.  Its flags are the ones the board build used;
-          # congestion spreading and timing-driven rip-up measured better on
-          # it than the gate default.  About 80 minutes of P&R on a desktop.
-          - name: vc707-cdc6000
-            tier: stretch
-            source: netlist
-            design: vc707-cdc6000
-            netlist: vc707_cdc_sb.json.gz
-            xdc: vc707_cdc_sb.xdc
-            family: virtex7
-            part: xc7vx485tffg1761-2
-            die: xc7vx485t
-            timeout: 300
-            pnr_flags: --placer-heap-timingweight 60 --placer-heap-congestion-spread --tmg-ripup
-
-          - name: vc707-litex-linux
-            tier: stretch
-            source: netlist
-            design: vc707-litex-linux
-            netlist: xilinx_vc707.json.gz
-            xdc: xilinx_vc707.xdc
-            family: virtex7
-            part: xc7vx485tffg1761-2
-            die: xc7vx485t
-            timeout: 300
-
-          # The second Linux SoC, and not merely the first with more cores:
-          # VexRiscv-SMP carries a RISC-V CLINT and PLIC, where the
-          # single-core variant has neither -- its whole peripheral set is a
-          # LiteX timer and a UART, and its machine-mode layer is LiteX's
-          # emulator rather than OpenSBI.  Different clock structure,
-          # different interrupt fabric, ~20% more logic: a change that breaks
-          # one and not the other is worth looking at.
-          #
-          # It answers to 10:e2:d5:53:4d:50 -- "SMP" in the low three bytes --
-          # rather than sharing 00:00:07 with its sibling.  The MAC is
-          # compiled into the gateware and names the TFTP directory the BIOS
-          # boots from, so two SoCs sharing one silently share a payload
-          # directory.  Nothing in CI boots these, but the netlists are the
-          # same ones used on hardware and the distinction is easier to keep
-          # than to reintroduce.
-          # The largest design in the gate: 47719 cells against the SMP SoC's
-          # 22396, with DSPs and deep BRAM the smaller entries do not reach.
-          # Rocket in LiteX's `medium` configuration, rv64imac -- NO FPU,
-          # which is the configuration that fits this part rather than a
-          # simplification.  Stretch, and honestly so: it answers whether
-          # nextpnr completes at this scale and what it costs.  No bitstream
-          # from this netlist has been on hardware, so nothing here claims it
-          # runs.
-          - name: vc707-litex-rocket
-            tier: stretch
-            source: netlist
-            design: vc707-litex-rocket
-            netlist: xilinx_vc707.json.gz
-            xdc: xilinx_vc707.xdc
-            family: virtex7
-            part: xc7vx485tffg1761-2
-            die: xc7vx485t
-            timeout: 600
-
-          - name: vc707-litex-linux-smp
-            tier: stretch
-            source: netlist
-            design: vc707-litex-linux-smp
-            netlist: xilinx_vc707.json.gz
-            xdc: xilinx_vc707.xdc
-            family: virtex7
-            part: xc7vx485tffg1761-2
-            die: xc7vx485t
-            timeout: 300
-
-          # The same SoC family again, but with a 64-bit DDR3 interface: the
-          # full 1 GB of the VC707's SODIMM rather than 512 MB, plus a 128 KiB
-          # L2.  It earns its place by being the design that MISSED TIMING --
-          # its DDR controller domain is constrained at 100 MHz and the open
-          # flow reached 75.59, which places, routes, assembles and configures
-          # with DONE asserted and then miscomputes on hardware.  A measured
-          # delay matrix and a higher placer timing weight take it to 106.50
-          # MHz; this entry pins both so the fix cannot quietly rot.  It was the
-          # first entry to override PNR_PLACER_FLAGS, and is the only one whose
-          # interest is Fmax rather than completion.  See its README.
-          - name: vc707-litex-linux-1gb
-            tier: stretch
-            source: netlist
-            design: vc707-litex-linux-1gb
-            netlist: xilinx_vc707.json.gz
-            xdc: xilinx_vc707.xdc
-            family: virtex7
-            part: xc7vx485tffg1761-2
-            die: xc7vx485t
-            timeout: 600
-            pnr_flags: --placer-heap-timingweight 100
-
-          # The design that showed nextpnr's timing report could not be
-          # trusted for deep memories: a 2.5 MB ROM of 640 RAMB36s holding
-          # Linux.  Before the clock-tree model and the block RAM placement it
-          # met 100 MHz by the report and read its ROM wrongly on the board;
-          # with them it boots.  The only entry gated on placement quality:
-          # bram_fom.py's score of its block RAMs, from the placement alone,
-          # must stay with the placements that read their ROM on the board.
-          # Stretch, like every netlist entry, so a failing score turns this
-          # job red on the PR without blocking it: hours of P&R on a hosted
-          # runner cannot be a required check, and the red is the signal.
-          # Its netlist is Verilator's, not yosys's, and its flags are the
-          # board build's.  See its README.
-          - name: vc707-litex-romlinux
-            tier: stretch
-            source: netlist
-            design: vc707-litex-romlinux
-            netlist: xilinx_vc707.json.gz
-            xdc: xilinx_vc707.xdc
-            family: virtex7
-            part: xc7vx485tffg1761-2
-            die: xc7vx485t
-            timeout: 300
-            pnr_flags: --placer-heap-timingweight 100 --placer-heap-congestion-spread -o delay-matrix=$EX/delay-matrix-xc7vx485t.txt
-            fom_max_worst: 6100
-            fom_max_p95: 5400
-
-          # The lowRISC Sonata's Linux SoC: dual-core VexRiscv-SMP with a
-          # shared FPU, 64 KiB I-caches and HyperRAM, on an xc7a50t.  It is
-          # the one entry that needs --placer-heap-congestion-spread.  HeAP
-          # packs this SoC into one corner of the die and router2 never
-          # converges from there (overuse floors at ~5 k wires and climbs);
-          # with congestion-driven spreading it routes to zero overuse.
-          # Pinning the flag here keeps that path exercised.  --freq 25
-          # matches the LiteX build script.  See its README.
-          - name: sonata-linux
-            tier: stretch
-            source: netlist
-            design: sonata-linux
-            netlist: sonata.json.gz
-            xdc: sonata.xdc
-            family: artix7
-            part: xc7a50tcsg324-2
-            die: xc7a50t
-            timeout: 120
-            pnr_flags: --placer-heap-timingweight 60 --placer-heap-congestion-spread --freq 25
+            netlist: ""
+            xdc: ""
+            pnr_flags: ""
+            fom_max_worst: ""
+            fom_max_p95: ""
+            lvs_blocked: ""
+            lvs_blocked_differ: ""
 
     steps:
       - uses: actions/checkout@v4
@@ -1208,3 +814,84 @@ jobs:
             ${{ matrix.name }}.fasm
             ${{ matrix.name }}.bit
           if-no-files-found: warn
+
+  # Clean runner.  Both apt lists the demos job installs (build deps and
+  # yosys).  pip is not part of the package set.  Test branch only.
+  Dpkg-today:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+    - name: Show apt mirror list and archive
+      run: |
+        echo "apt-mirrors.txt:"
+        cat /etc/apt/apt-mirrors.txt
+        echo "archives:"
+        ls -la /var/cache/apt/archives
+    - name: Install
+      timeout-minutes: 45
+      run: |
+        sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+        sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y git make cmake libboost-all-dev python3-dev
+        sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y yosys
+    - name: Record installed packages
+      run: dpkg-query -W -f '${Package} ${Version}\n' > dpkg-query.txt
+    - uses: actions/upload-artifact@v4
+      with:
+        name: dpkg-today-demos
+        path: dpkg-query.txt
+
+  # Both lists through the script, on a clean runner.
+  Dpkg-script:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+    - uses: actions/checkout@v4
+    - name: Show apt mirror list and archive
+      run: |
+        echo "apt-mirrors.txt:"
+        cat /etc/apt/apt-mirrors.txt
+        echo "archives before restore:"
+        ls -la /var/cache/apt/archives
+    - name: Apt cache key (build deps)
+      id: apt-build-key
+      timeout-minutes: 10
+      run: .github/ci/apt-install.sh key .github/ci/apt-demos-build.list
+
+    - name: Restore apt packages (build deps)
+      id: apt-build-cache
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ runner.temp }}/apt-demos-build
+        key: ${{ steps.apt-build-key.outputs.key }}
+        restore-keys: |
+          ${{ steps.apt-build-key.outputs.prefix-image }}
+          ${{ steps.apt-build-key.outputs.prefix-os }}
+
+    - name: Install build deps
+      timeout-minutes: 35
+      run: .github/ci/apt-install.sh install .github/ci/apt-demos-build.list "${{ runner.temp }}/apt-demos-build"
+
+    - name: Apt cache key (yosys)
+      id: apt-yosys-key
+      timeout-minutes: 10
+      run: .github/ci/apt-install.sh key .github/ci/apt-demos-yosys.list
+
+    - name: Restore apt packages (yosys)
+      id: apt-yosys-cache
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ runner.temp }}/apt-demos-yosys
+        key: ${{ steps.apt-yosys-key.outputs.key }}
+        restore-keys: |
+          ${{ steps.apt-yosys-key.outputs.prefix-image }}
+          ${{ steps.apt-yosys-key.outputs.prefix-os }}
+
+    - name: Install yosys
+      timeout-minutes: 35
+      run: .github/ci/apt-install.sh install .github/ci/apt-demos-yosys.list "${{ runner.temp }}/apt-demos-yosys"
+    - name: Record installed packages
+      run: dpkg-query -W -f '${Package} ${Version}\n' > dpkg-query.txt
+    - uses: actions/upload-artifact@v4
+      with:
+        name: dpkg-script-demos
+        path: dpkg-query.txt

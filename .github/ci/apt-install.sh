@@ -54,8 +54,13 @@ install)
       sudo sed -i '/azure\.archive\.ubuntu\.com/d' /etc/apt/apt-mirrors.txt
       upd=update
     fi
-    echo "apt-install: download attempt $n, cap ${CAP}s"
-    if sudo timeout -k 20 "$CAP" "$0" fetch "$upd" "${pkgs[@]}"; then
+    # Test branch only: a job can cut attempt 1 short to drive the retry.
+    cap=$CAP
+    if ((n == 1)); then
+      cap=${APT_TEST_FIRST_CAP:-$CAP}
+    fi
+    echo "apt-install: download attempt $n, cap ${cap}s"
+    if sudo timeout -k 20 "$cap" "$0" fetch "$upd" "${pkgs[@]}"; then
       break
     fi
     echo "apt-install: download attempt $n failed"

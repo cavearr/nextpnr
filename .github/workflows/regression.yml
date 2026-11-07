@@ -25,6 +25,9 @@ name: regression
 on:
   pull_request:
   workflow_dispatch:
+  push:
+    branches:
+      - ci/apt-cache-test
 
 concurrency:
   group: regression-${{ github.ref }}
@@ -170,3 +173,67 @@ jobs:
           echo "lutram-ram32x1s-x4 #56: same gap today; the multi-cell placement is the patch posted on PR #56"
           demo-projects/regression/run.sh lutram-ram32x1s lutram-ram32x2s \
             lutram-ram32x1s-x4
+
+  # Clean runner, today's apt-get line.  Test branch only.
+  Dpkg-today:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+    - name: Show apt mirror list and archive
+      run: |
+        echo "apt-mirrors.txt:"
+        cat /etc/apt/apt-mirrors.txt
+        echo "archives:"
+        ls -la /var/cache/apt/archives
+    - name: Install
+      timeout-minutes: 45
+      run: |
+        sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+        sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y build-essential cmake ninja-build \
+          libboost-all-dev python3-dev libeigen3-dev pkg-config yosys
+    - name: Record installed packages
+      run: dpkg-query -W -f '${Package} ${Version}\n' > dpkg-query.txt
+    - uses: actions/upload-artifact@v4
+      with:
+        name: dpkg-today-regression
+        path: dpkg-query.txt
+
+  # Same list through the script.  The first download attempt is cut after
+  # 15 seconds so the retry and the mirror change run on a real runner.
+  Dpkg-script:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+    - uses: actions/checkout@v4
+    - name: Show apt mirror list and archive
+      run: |
+        echo "apt-mirrors.txt:"
+        cat /etc/apt/apt-mirrors.txt
+        echo "archives before restore:"
+        ls -la /var/cache/apt/archives
+    - name: Apt cache key
+      id: apt-key
+      timeout-minutes: 10
+      run: .github/ci/apt-install.sh key .github/ci/apt-regression.list
+
+    - name: Restore apt packages
+      id: apt-cache
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ runner.temp }}/apt-regression
+        key: ${{ steps.apt-key.outputs.key }}
+        restore-keys: |
+          ${{ steps.apt-key.outputs.prefix-image }}
+          ${{ steps.apt-key.outputs.prefix-os }}
+
+    - name: Install dependencies
+      timeout-minutes: 35
+      env:
+        APT_TEST_FIRST_CAP: "15"
+      run: .github/ci/apt-install.sh install .github/ci/apt-regression.list "${{ runner.temp }}/apt-regression"
+    - name: Record installed packages
+      run: dpkg-query -W -f '${Package} ${Version}\n' > dpkg-query.txt
+    - uses: actions/upload-artifact@v4
+      with:
+        name: dpkg-script-regression
+        path: dpkg-query.txt

@@ -164,7 +164,9 @@ jobs:
   # a cache saved on main but not one saved by another pull request, so the
   # lists are saved here.  Each list is the file the installing job reads.
   Cache-apt:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # Also on the test branch, so a rerun of that push restores what
+    # the first run saved.  The pull request does not carry this line.
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/ci/apt-cache-test')
     runs-on: ubuntu-24.04
     timeout-minutes: 50
     strategy:
@@ -207,3 +209,64 @@ jobs:
       with:
         path: ${{ runner.temp }}/${{ matrix.cache }}
         key: ${{ steps.apt-key.outputs.key }}
+
+  # Clean runner, today's apt-get line, so the package set can be compared
+  # with the script.  Test branch only.
+  Dpkg-today:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+    - name: Show apt mirror list and archive
+      run: |
+        echo "apt-mirrors.txt:"
+        cat /etc/apt/apt-mirrors.txt
+        echo "archives:"
+        ls -la /var/cache/apt/archives
+    - name: Install
+      timeout-minutes: 45
+      run: |
+        sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+        sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install git make cmake libboost-all-dev python3-dev pypy3 libeigen3-dev tcl-dev lzma-dev libftdi-dev clang bison flex swig qt6-base-dev iverilog libreadline-dev liblzma-dev cargo rustc
+    - name: Record installed packages
+      run: dpkg-query -W -f '${Package} ${Version}\n' > dpkg-query.txt
+    - uses: actions/upload-artifact@v4
+      with:
+        name: dpkg-today-arch
+        path: dpkg-query.txt
+
+  # Same list through the script, on a clean runner.
+  Dpkg-script:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+    - uses: actions/checkout@v4
+    - name: Show apt mirror list and archive
+      run: |
+        echo "apt-mirrors.txt:"
+        cat /etc/apt/apt-mirrors.txt
+        echo "archives before restore:"
+        ls -la /var/cache/apt/archives
+    - name: Apt cache key
+      id: apt-key
+      timeout-minutes: 10
+      run: .github/ci/apt-install.sh key .github/ci/apt-arch.list
+
+    - name: Restore apt packages
+      id: apt-cache
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ runner.temp }}/apt-arch
+        key: ${{ steps.apt-key.outputs.key }}
+        restore-keys: |
+          ${{ steps.apt-key.outputs.prefix-image }}
+          ${{ steps.apt-key.outputs.prefix-os }}
+
+    - name: Install
+      timeout-minutes: 35
+      run: .github/ci/apt-install.sh install .github/ci/apt-arch.list "${{ runner.temp }}/apt-arch"
+    - name: Record installed packages
+      run: dpkg-query -W -f '${Package} ${Version}\n' > dpkg-query.txt
+    - uses: actions/upload-artifact@v4
+      with:
+        name: dpkg-script-arch
+        path: dpkg-query.txt
