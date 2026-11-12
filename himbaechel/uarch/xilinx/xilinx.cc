@@ -895,8 +895,9 @@ void XilinxImpl::close_routed_tiles()
 
 void XilinxImpl::prePlace()
 {
-    check_part_limits();
+    // After apply_holdbufs(): its buffers are LUT cells too.
     apply_holdbufs();
+    check_part_limits();
     apply_preplaced();
     close_routed_tiles();
     // Before placement, so the measured table reaches the placer (through
@@ -1445,6 +1446,8 @@ void XilinxImpl::postRoute()
     // Insert feedthrough buffers on hold-violating arcs and reroute, before
     // routing is finalised and FASM is written.  No-op unless -o hold-fix.
     fixup_hold();
+    // Again: the hold-fix buffers are LUT cells, and FASM is written next.
+    check_part_limits();
     fixup_routing();
     // After the last timing analysis (hold-fix runs one).
     name_clocks_after_ports();
